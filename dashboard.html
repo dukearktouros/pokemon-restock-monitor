@@ -76,7 +76,26 @@
   .pill.queue, .pill.blocked { background: var(--warn-bg); color: var(--warn); }
   .pill.error { background: var(--bad-bg); color: var(--bad); }
   .tag { font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 5px; background: var(--info-bg); color: var(--info); }
+  .tag.cat { background: var(--neutral-bg); color: var(--text); }
+  .tag.warn { background: var(--warn-bg); color: var(--warn); }
   .empty { color: var(--muted); padding: 18px 0 6px; }
+  .pill.marketplace { background: var(--warn-bg); color: var(--warn); }
+  select { font: inherit; color: var(--text); background: var(--panel-2); border: 1px solid var(--border);
+           border-radius: 8px; padding: 8px 10px; min-width: 0; }
+  .meta select { padding: 1px 4px; font-size: 12px; border-radius: 5px; }
+  form.add select { flex: 0 1 190px; }
+  .tabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
+  .tabs button { padding: 4px 11px; font-size: 13px; border-radius: 999px; }
+  .tabs button.on { background: var(--text); color: var(--bg); border-color: var(--text); }
+  .head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+  .head h2 { margin: 0; }
+  .item.flagged { opacity: .6; }
+  .note { font-size: 13px; color: var(--muted); background: var(--panel-2); border-radius: 8px; padding: 10px 12px; }
+  .cat-row { display: grid; grid-template-columns: 1fr 1.6fr 92px auto; gap: 6px; align-items: center; padding: 6px 0; }
+  .cat-row input { width: 100%; font-size: 14px; padding: 7px 9px; }
+  .cat-head { font-size: 12px; color: var(--muted); padding-bottom: 0; }
+  .feed .discover { color: var(--info); font-weight: 600; }
+  .feed .skipped { color: var(--warn); }
 
   .cols { display: grid; grid-template-columns: 1.3fr 1fr; gap: 16px; }
   .feed { list-style: none; margin: 0; padding: 0; max-height: 460px; overflow: auto; }
@@ -98,6 +117,8 @@
 
   @media (max-width: 780px) {
     .cols { grid-template-columns: 1fr; }
+    .cat-row { grid-template-columns: 1fr 1fr; }
+    .cat-head { display: none; }
     .item { grid-template-columns: 44px 1fr; }
     .thumb { width: 44px; height: 44px; }
     .right { grid-column: 1 / -1; flex-direction: row; justify-content: space-between; align-items: center; }
@@ -123,6 +144,7 @@
     <h2>Watch a product</h2>
     <form class="add" id="addForm">
       <input class="url" name="url" placeholder="Paste a Target or Pokémon Center product link…" required>
+      <select name="category_id" id="addCategory" aria-label="Category"></select>
       <input class="max" name="max_price" placeholder="Max price $" inputmode="decimal">
       <button class="primary" type="submit">Add</button>
     </form>
@@ -131,14 +153,40 @@
 
   <section class="panel">
     <h2>Watchlist</h2>
+    <div class="tabs" id="tabs"></div>
     <div class="items" id="items"></div>
   </section>
 
+  <section class="panel">
+    <div class="head">
+      <h2>Discover: new listings</h2>
+      <button class="small" id="dismissAll">Dismiss all</button>
+    </div>
+    <div id="discoverNote"></div>
+    <div class="items" id="discoveries"></div>
+  </section>
+
   <div class="cols">
-    <section class="panel">
-      <h2>Activity</h2>
-      <ul class="feed" id="feed"></ul>
-    </section>
+    <div>
+      <section class="panel" id="categoriesPanel">
+        <h2>Categories</h2>
+        <div class="cat-row cat-head"><span>Name</span><span>Search words (comma separated)</span><span>Max $</span><span></span></div>
+        <div id="categories"></div>
+        <form class="cat-row" id="newCategory">
+          <input name="name" placeholder="New category">
+          <input name="keywords" placeholder="e.g. pokemon surging sparks">
+          <input name="max_price" placeholder="Max $" inputmode="decimal">
+          <button class="small primary" type="submit">Add</button>
+        </form>
+        <div class="hint">Discover searches Target and Pokémon Center for these words. Max $ is the most you'd pay
+          for anything in the category. Set it near retail so reseller prices never alert you.</div>
+        <div class="msg" id="catMsg"></div>
+      </section>
+      <section class="panel">
+        <h2>Activity</h2>
+        <ul class="feed" id="feed"></ul>
+      </section>
+    </div>
 
     <section class="panel settings" id="settings">
       <h2>Settings</h2>
@@ -146,7 +194,15 @@
         <label for="discord_webhook">Discord webhook link</label>
         <input id="discord_webhook" name="discord_webhook" placeholder="https://discord.com/api/webhooks/…">
         <div class="hint">Discord server → Edit channel → Integrations → Webhooks → New → Copy URL.</div>
-        <label class="check"><input type="checkbox" id="ping_everyone"> Ping @everyone (makes your phone buzz)</label>
+        <label class="check"><input type="checkbox" name="ping_everyone"> Ping @everyone (makes your phone buzz)</label>
+        <label class="check"><input type="checkbox" name="retail_only"> Only alert when sold by the store itself (skip 3rd-party sellers)</label>
+
+        <label>Chrome helper</label>
+        <label class="check"><input type="checkbox" name="target_via_chrome"> Check Target items in Chrome</label>
+        <label class="check"><input type="checkbox" name="pc_via_chrome"> Check Pokémon Center items in Chrome</label>
+        <label class="check"><input type="checkbox" name="auto_cart"> When in stock: add to cart and open checkout (you press Place order)</label>
+        <label for="discover_minutes">Discover searches every (minutes, 0 = off)</label>
+        <input id="discover_minutes" name="discover_minutes" inputmode="numeric">
 
         <label>Check every (seconds)</label>
         <div class="row3">
@@ -176,11 +232,13 @@
 <script>
 const $ = (sel) => document.querySelector(sel);
 const STATUS_LABEL = { in_stock: "In stock", out_of_stock: "Sold out", unknown: "Checking…",
-  queue: "Queue live", blocked: "Blocked", error: "Error" };
+  queue: "Queue live", blocked: "Blocked", error: "Error", marketplace: "3rd-party only" };
 const STORE = { target: "Target", pokemoncenter: "Pokémon Center", walmart: "Walmart",
   bestbuy: "Best Buy", gamestop: "GameStop", amazon: "Amazon", other: "Other" };
 let latest = null;
 let settingsLoaded = false;
+let tab = "all";
+let categoriesKey = "";
 
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -226,6 +284,7 @@ function render() {
   const hasHook = !!settings.discord_webhook;
   $("#chips").innerHTML =
     `<span class="chip">Watching ${active} item${active === 1 ? "" : "s"}</span>` +
+    `<span class="chip ${latest.chrome.connected ? "ok" : "bad"}">Chrome helper ${latest.chrome.connected ? "connected" : "not connected"}</span>` +
     (inStock ? `<span class="chip ok">${inStock} in stock</span>` : "") +
     `<span class="chip ${hasHook ? "ok" : "bad"}">Discord ${hasHook ? "on" : "off"}</span>`;
   $("#setupBanner").hidden = hasHook;
@@ -233,10 +292,24 @@ function render() {
   $("#newVersion").textContent = "v" + (latest.update_available || "");
   $("#version").textContent = "v" + latest.version;
 
-  $("#items").innerHTML = items.length ? items.map((i) => {
+  const cats = latest.categories;
+  const catName = (id) => (cats.find((c) => c.id === id) || {}).name;
+  const catOptions = (selected) => `<option value="">No category</option>` +
+    cats.map((c) => `<option value="${c.id}" ${c.id === selected ? "selected" : ""}>${esc(c.name)}</option>`).join("");
+
+  if (!$("#addForm").contains(document.activeElement)) $("#addCategory").innerHTML = catOptions(null);
+  if (tab !== "all" && tab !== "none" && !cats.some((c) => String(c.id) === tab)) tab = "all";
+  $("#tabs").innerHTML = cats.length ? [["all", "All", items.length],
+    ...cats.map((c) => [String(c.id), c.name, items.filter((i) => i.category_id === c.id).length]),
+    ["none", "No category", items.filter((i) => !i.category_id).length]]
+    .map(([id, name, n]) => `<button class="${tab === id ? "on" : ""}" data-tab="${id}">${esc(name)} (${n})</button>`).join("") : "";
+  const shown = items.filter((i) => tab === "all" || (tab === "none" ? !i.category_id : String(i.category_id) === tab));
+
+  if (!$("#items").contains(document.activeElement)) $("#items").innerHTML = shown.length ? shown.map((i) => {
     const status = i.enabled ? i.status : "paused";
     const label = i.enabled ? (STATUS_LABEL[i.status] || i.status) : "Paused";
-    const note = i.last_error || i.detail;
+    const waiting = i.via_chrome && !latest.chrome.connected && i.enabled;
+    const note = waiting ? "Waiting for the Chrome helper - open Chrome (see README to install it)" : (i.last_error || i.detail);
     return `<div class="item ${i.enabled ? "" : "paused"}">
       ${i.image ? `<img class="thumb" src="${esc(i.image)}" alt="" loading="lazy" data-pic="${i.id}" title="Click to change picture">`
         : `<div class="thumb" data-pic="${i.id}" title="Click to add a picture">+ pic</div>`}
@@ -244,12 +317,15 @@ function render() {
         <a class="name" href="${esc(i.url)}" target="_blank" rel="noopener">${esc(displayName(i))}</a>
         <div class="meta">
           <span class="tag">${esc(STORE[i.retailer] || i.retailer)}</span>
+          ${cats.length ? `<select data-cat="${i.id}" aria-label="Category">${catOptions(i.category_id)}</select>` : ""}
           ${i.price != null ? `<span>${money(i.price)}</span>` : ""}
-          <span>Max: <a href="#" data-edit="${i.id}">${i.max_price != null ? money(i.max_price) : "any"}</a></span>
+          <span>Max: <a href="#" data-edit="${i.id}">${i.max_price != null ? money(i.max_price)
+            : (cats.find((c) => c.id === i.category_id) || {}).max_price != null
+              ? money(cats.find((c) => c.id === i.category_id).max_price) + " (category)" : "any"}</a></span>
           <span>Checked ${ago(i.last_checked, now)}</span>
           ${i.last_in_stock ? `<span>Last in stock ${ago(i.last_in_stock, now)}</span>` : ""}
         </div>
-        ${note ? `<div class="detail ${i.last_error ? "err" : ""}">${esc(note)}</div>` : ""}
+        ${note ? `<div class="detail ${i.last_error || waiting ? "err" : ""}">${esc(note)}</div>` : ""}
       </div>
       <div class="right">
         <span class="pill ${esc(status)}">${esc(label)}</span>
@@ -260,7 +336,42 @@ function render() {
         </div>
       </div>
     </div>`;
-  }).join("") : `<div class="empty">Nothing watched yet. Paste a product link above to start.</div>`;
+  }).join("") : `<div class="empty">${items.length ? "Nothing in this category yet." : "Nothing watched yet. Paste a product link above to start."}</div>`;
+
+  const finds = latest.discoveries;
+  $("#discoverNote").innerHTML = latest.chrome.connected ? "" :
+    `<div class="note">Discover runs inside the Chrome helper. Install it (see README), keep Chrome open, and new listings will show up here.</div>`;
+  $("#dismissAll").hidden = !finds.length;
+  $("#discoveries").innerHTML = finds.length ? finds.map((d) => `
+    <div class="item ${d.flag ? "flagged" : ""}">
+      ${d.image ? `<img class="thumb" src="${esc(d.image)}" alt="" loading="lazy">` : `<div class="thumb"></div>`}
+      <div>
+        <a class="name" href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.name)}</a>
+        <div class="meta">
+          <span class="tag">${esc(STORE[d.site] || d.site)}</span>
+          ${catName(d.category_id) ? `<span class="tag cat">${esc(catName(d.category_id))}</span>` : ""}
+          ${d.price != null ? `<span>${money(d.price)}</span>` : ""}
+          <span>Found ${ago(d.found_at, now)}</span>
+          ${d.flag ? `<span class="tag warn">${esc(d.flag)}</span>` : ""}
+        </div>
+      </div>
+      <div class="right"><div class="actions">
+        <button class="small primary" data-find="add" data-id="${d.id}">Watch</button>
+        <button class="small" data-find="dismiss" data-id="${d.id}">Dismiss</button>
+      </div></div>
+    </div>`).join("") : latest.chrome.connected ? `<div class="empty">No new listings right now. Discover checks your categories' search words regularly.</div>` : "";
+
+  const key = JSON.stringify(cats);
+  if (key !== categoriesKey && !$("#categories").contains(document.activeElement)) {
+    categoriesKey = key;
+    $("#categories").innerHTML = cats.map((c) => `
+      <form class="cat-row" data-catform="${c.id}">
+        <input name="name" value="${esc(c.name)}" aria-label="Name">
+        <input name="keywords" value="${esc(c.keywords || "")}" aria-label="Search words">
+        <input name="max_price" value="${c.max_price != null ? Number(c.max_price).toFixed(2) : ""}" placeholder="any" aria-label="Max price" inputmode="decimal">
+        <span class="actions"><button class="small" type="submit">Save</button><button class="small" type="button" data-delcat="${c.id}">✕</button></span>
+      </form>`).join("");
+  }
 
   $("#feed").innerHTML = events.length ? events.map((e) =>
     `<li><time>${clock(e.ts)}</time><span class="${esc(e.kind)}">${esc(e.message)}</span></li>`
@@ -271,8 +382,12 @@ function render() {
 
 function fillSettings(s) {
   const form = $("#settingsForm");
-  for (const key of Object.keys(s)) if (form.elements[key]) form.elements[key].value = s[key];
-  $("#ping_everyone").checked = s.ping_everyone === "1";
+  for (const key of Object.keys(s)) {
+    const el = form.elements[key];
+    if (!el) continue;
+    if (el.type === "checkbox") el.checked = s[key] === "1";
+    else el.value = s[key];
+  }
   settingsLoaded = true;
 }
 
@@ -285,7 +400,7 @@ $("#addForm").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const f = ev.target;
   try {
-    await api("/api/items", "POST", { url: f.url.value, max_price: f.max_price.value });
+    await api("/api/items", "POST", { url: f.url.value, max_price: f.max_price.value, category_id: f.category_id.value });
     f.reset();
     flash($("#addMsg"), "Added - checking it now…", true);
     refresh();
@@ -324,8 +439,10 @@ $("#items").addEventListener("click", async (ev) => {
 
 $("#settingsForm").addEventListener("submit", async (ev) => {
   ev.preventDefault();
-  const data = Object.fromEntries(new FormData(ev.target));
-  data.ping_everyone = $("#ping_everyone").checked ? "1" : "0";
+  const data = {};
+  for (const el of ev.target.elements) {
+    if (el.name) data[el.name] = el.type === "checkbox" ? (el.checked ? "1" : "0") : el.value;
+  }
   try {
     await api("/api/settings", "POST", data);
     settingsLoaded = false;
@@ -351,6 +468,54 @@ $("#updateBtn").addEventListener("click", async () => {
     btn.textContent = "Restarting…";
     setTimeout(() => location.reload(), 5000);
   } catch (e) { alert(e.message); btn.disabled = false; btn.textContent = "Update now"; }
+});
+
+$("#tabs").addEventListener("click", (ev) => {
+  const b = ev.target.closest("[data-tab]");
+  if (b) { tab = b.dataset.tab; render(); }
+});
+
+$("#items").addEventListener("change", async (ev) => {
+  const sel = ev.target.closest("[data-cat]");
+  if (!sel) return;
+  await api(`/api/items/${sel.dataset.cat}/edit`, "POST", { category_id: sel.value });
+  sel.blur();
+  refresh();
+});
+
+$("#discoveries").addEventListener("click", async (ev) => {
+  const b = ev.target.closest("[data-find]");
+  if (!b) return;
+  try { await api(`/api/discoveries/${b.dataset.id}/${b.dataset.find}`, "POST"); }
+  catch (e) { alert(e.message); }
+  refresh();
+});
+$("#dismissAll").addEventListener("click", async () => {
+  if (!confirm("Dismiss every new listing shown?")) return;
+  await api("/api/discoveries/dismiss-all", "POST");
+  refresh();
+});
+
+$("#categoriesPanel").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const f = ev.target;
+  const el = f.elements;
+  const data = { name: el.name.value, keywords: el.keywords.value, max_price: el.max_price.value };
+  try {
+    if (f.id === "newCategory") { await api("/api/categories", "POST", data); f.reset(); }
+    else await api(`/api/categories/${f.dataset.catform}`, "POST", data);
+    document.activeElement.blur();
+    categoriesKey = "";
+    flash($("#catMsg"), "Saved.", true);
+    refresh();
+  } catch (e) { flash($("#catMsg"), e.message, false); }
+});
+$("#categoriesPanel").addEventListener("click", async (ev) => {
+  const b = ev.target.closest("[data-delcat]");
+  if (!b || !confirm("Delete this category? Items in it stay on your watchlist.")) return;
+  await api(`/api/categories/${b.dataset.delcat}`, "DELETE");
+  categoriesKey = "";
+  refresh();
 });
 
 refresh();

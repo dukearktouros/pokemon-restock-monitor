@@ -52,6 +52,11 @@ DEFAULT_SETTINGS = {
     "interval_other": "60",
     "target_zip": "",
     "target_store_id": "",
+    "retail_only": "1",
+    "target_via_chrome": "1",
+    "pc_via_chrome": "0",
+    "auto_cart": "0",
+    "discover_minutes": "15",
 }
 
 IN_STOCK = "in_stock"
@@ -60,12 +65,15 @@ UNKNOWN = "unknown"
 QUEUE = "queue"
 BLOCKED = "blocked"
 ERROR = "error"
+MARKETPLACE = "marketplace"   # in stock, but only from a third-party seller
 
 START_TIME = time.time()
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 UPDATE_BASE = "https://raw.githubusercontent.com/dukearktouros/pokemon-restock-monitor/main/"
-UPDATE_FILES = ["app.py", "dashboard.html", "README.md", "Start (Windows).bat", "Start (Mac).command"]
+UPDATE_FILES = ["app.py", "dashboard.html", "README.md", "Start (Windows).bat", "Start (Mac).command",
+                "chrome-helper/manifest.json", "chrome-helper/background.js"]
+HELPER_MANIFEST = os.path.join(HERE, "chrome-helper", "manifest.json")
 
 
 # ---------------------------------------------------------------- database
@@ -98,6 +106,34 @@ SCHEMA = [
         message TEXT NOT NULL
     )""",
     "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)",
+    """CREATE TABLE IF NOT EXISTS categories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        keywords TEXT,
+        max_price REAL
+    )""",
+    """CREATE TABLE IF NOT EXISTS discoveries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        key TEXT NOT NULL UNIQUE,
+        category_id INTEGER,
+        site TEXT NOT NULL,
+        url TEXT NOT NULL,
+        name TEXT,
+        price REAL,
+        image TEXT,
+        seller TEXT,
+        flag TEXT,
+        status TEXT NOT NULL DEFAULT 'new',
+        found_at REAL NOT NULL
+    )""",
+]
+
+MIGRATIONS = [("items", "category_id", "INTEGER"), ("items", "seller", "TEXT")]
+
+STARTER_CATEGORIES = [
+    ("Ascended Heroes", "pokemon ascended heroes"),
+    ("Prismatic Evolutions", "pokemon prismatic evolutions"),
+    ("30th Celebration", "pokemon 30th celebration"),
 ]
 
 
@@ -125,6 +161,13 @@ def execute(sql, args=()):
 def init_db():
     for statement in SCHEMA:
         execute(statement)
+    for table, column, kind in MIGRATIONS:
+        if column not in {r["name"] for r in query("PRAGMA table_info(%s)" % table)}:
+            execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, column, kind))
+    if not query("SELECT 1 FROM settings WHERE key = 'categories_seeded'"):
+        for name, keywords in STARTER_CATEGORIES:
+            execute("INSERT INTO categories(name, keywords) VALUES (?, ?)", (name, keywords))
+        execute("INSERT INTO settings(key, value) VALUES ('categories_seeded', '1')")
 
 
 def get_settings():
@@ -379,6 +422,9 @@ def parse_product_page(text):
                 if not isinstance(candidate, dict):
                     continue
                 status = _availability(candidate.get("availability"))
+                seller = candidate.get("seller")
+                if isinstance(seller, dict) and seller.get("name"):
+                    result.setdefault("seller", str(seller["name"]).strip())
                 price = parse_price(candidate.get("price") or candidate.get("lowPrice"))
                 if price is not None and result.get("price") is None:
                     result["price"] = price
@@ -444,7 +490,7 @@ def fill_missing_details():
 
 # ---------------------------------------------------------------- alerts
 
-def send_discord(settings, item, title, description, color):
+def send_discord(settings, item, title, description, color, ping=None):
     hook = settings["discord_webhook"].strip()
     if not hook:
         return False, "No Discord webhook set"
@@ -463,7 +509,8 @@ def send_discord(settings, item, title, description, color):
     }
     if item.get("image"):
         embed["thumbnail"] = {"url": item["image"]}
-    ping = settings["ping_everyone"] == "1"
+    if ping is None:
+        ping = settings["ping_everyone"] == "1"
     payload = {"content": "@everyone" if ping else "", "embeds": [embed],
                "allowed_mentions": {"parse": ["everyone"] if ping else []}}
     request = urllib.request.Request(hook, data=json.dumps(payload).encode(), method="POST",
@@ -479,6 +526,28 @@ def send_discord(settings, item, title, description, color):
 
 RETAILER_NAMES = {"target": "Target", "pokemoncenter": "Pokemon Center", "walmart": "Walmart",
                   "bestbuy": "Best Buy", "gamestop": "GameStop", "amazon": "Amazon", "other": "Other"}
+
+# A seller counts as the store itself when its name contains this.
+FIRST_PARTY = {"target": "target", "pokemoncenter": "pok", "walmart": "walmart", "bestbuy": "best buy",
+               "gamestop": "gamestop", "amazon": "amazon"}
+
+CHECKOUT_URLS = {"target": "https://www.target.com/checkout", "pokemoncenter": "https://www.pokemoncenter.com/cart"}
+
+
+def first_party(retailer, seller):
+    key = FIRST_PARTY.get(retailer)
+    return key is None or key in seller.lower()
+
+
+def effective_max(item):
+    """The item's own max price, or else its category's."""
+    if item["max_price"] is not None:
+        return item["max_price"]
+    if item.get("category_id"):
+        rows = query("SELECT max_price FROM categories WHERE id = ?", (item["category_id"],))
+        if rows:
+            return rows[0]["max_price"]
+    return None
 
 
 # ---------------------------------------------------------------- monitor loop
@@ -499,6 +568,75 @@ def interval_for(item, settings):
     return max(MIN_INTERVAL, seconds)
 
 
+def record_failure(item, message, blocked):
+    _failures[item["id"]] = _failures.get(item["id"], 0) + 1
+    if message != item["last_error"]:
+        log_event(item["id"], "error", message)
+    execute("UPDATE items SET status = ?, last_error = ?, last_checked = ? WHERE id = ?",
+            (BLOCKED if blocked else ERROR, message, time.time(), item["id"]))
+
+
+def apply_result(item, result, settings):
+    """Save a successful check and send whatever alert it calls for."""
+    item_id = item["id"]
+    _failures[item_id] = 0
+    now = time.time()
+    status = result["status"]
+    seller = result.get("seller") or None
+    third_party = (status == IN_STOCK and seller and not first_party(item["retailer"], seller)
+                   and settings["retail_only"] == "1")
+    if third_party:
+        status = MARKETPLACE
+    price = result.get("price") if result.get("price") is not None else item["price"]
+    name = result.get("name") or item["name"]
+    image = result.get("image") or item["image"]
+    if status in (IN_STOCK, OUT_OF_STOCK):
+        stock = status
+    else:
+        stock = OUT_OF_STOCK if status == MARKETPLACE else item["stock"]
+    detail = result.get("detail")
+    if seller:
+        detail = (detail + " | " if detail else "") + "Sold by " + seller
+    execute("""UPDATE items SET status = ?, stock = ?, detail = ?, price = ?, name = ?, image = ?, seller = ?,
+               last_checked = ?, last_error = NULL,
+               last_in_stock = CASE WHEN ? = 'in_stock' THEN ? ELSE last_in_stock END
+               WHERE id = ?""",
+            (status, stock, detail, price, name, image, seller, now, status, now, item_id))
+    updated = get_item(item_id)
+    label = name or item["url"]
+
+    max_price = effective_max(item)
+    was_too_pricey = max_price is not None and item["price"] is not None and item["price"] > max_price
+    if third_party and item["status"] != MARKETPLACE:
+        log_event(item_id, "skipped", "%s is only available from 3rd-party seller %s - no alert" % (label, seller))
+    elif status == IN_STOCK and (item["stock"] != IN_STOCK or (was_too_pricey and price <= max_price)):
+        if max_price is not None and price is not None and price > max_price:
+            log_event(item_id, "skipped", "%s is in stock but $%.2f is above your max of $%.2f - no alert"
+                      % (label, price, max_price))
+        else:
+            log_event(item_id, "in_stock", "IN STOCK: %s" % label)
+            ok, message = send_discord(settings, updated, "IN STOCK: %s" % label,
+                                       detail or "Go go go!", 0x22C55E)
+            log_event(item_id, "alert" if ok else "error", message)
+            open_in_chrome(updated)
+    elif status == OUT_OF_STOCK and item["stock"] == IN_STOCK:
+        log_event(item_id, "out_of_stock", "Sold out: %s" % label)
+    elif status == QUEUE and item["status"] != QUEUE:
+        log_event(item_id, "queue", "Queue is up: %s" % label)
+        ok, message = send_discord(settings, updated, "QUEUE IS LIVE: %s" % label,
+                                   "Pokemon Center's waiting room is up - get in line now.", 0xF59E0B)
+        log_event(item_id, "alert" if ok else "error", message)
+        open_in_chrome(updated)
+
+
+def schedule_next(item_id):
+    item = get_item(item_id)
+    if item:
+        interval = interval_for(item, get_settings())
+        backoff = min(2 ** _failures.get(item_id, 0), MAX_BACKOFF / interval)
+        _next_due[item_id] = time.time() + interval * backoff * random.uniform(0.85, 1.15)
+
+
 def run_check(item_id):
     try:
         item = get_item(item_id)
@@ -506,74 +644,35 @@ def run_check(item_id):
             return
         settings = get_settings()
         checker = CHECKERS.get(item["retailer"], check_page)
-        now = time.time()
         try:
             result = checker(item, settings)
         except (Blocked, CheckError) as e:
-            blocked = isinstance(e, Blocked)
-            _failures[item_id] = _failures.get(item_id, 0) + 1
-            message = str(e)
-            if message != item["last_error"]:
-                log_event(item_id, "error", message)
-            execute("UPDATE items SET status = ?, last_error = ?, last_checked = ? WHERE id = ?",
-                    (BLOCKED if blocked else ERROR, message, now, item_id))
+            record_failure(item, str(e), isinstance(e, Blocked))
             return
         except Exception as e:
-            _failures[item_id] = _failures.get(item_id, 0) + 1
-            message = "Unexpected problem: %s" % e
-            if message != item["last_error"]:
-                log_event(item_id, "error", message)
-            execute("UPDATE items SET status = ?, last_error = ?, last_checked = ? WHERE id = ?",
-                    (ERROR, message, now, item_id))
+            record_failure(item, "Unexpected problem: %s" % e, False)
             return
-
-        _failures[item_id] = 0
-        status = result["status"]
-        price = result.get("price") if result.get("price") is not None else item["price"]
-        name = result.get("name") or item["name"]
-        image = result.get("image") or item["image"]
-        stock = status if status in (IN_STOCK, OUT_OF_STOCK) else item["stock"]
-        execute("""UPDATE items SET status = ?, stock = ?, detail = ?, price = ?, name = ?, image = ?,
-                   last_checked = ?, last_error = NULL,
-                   last_in_stock = CASE WHEN ? = 'in_stock' THEN ? ELSE last_in_stock END
-                   WHERE id = ?""",
-                (status, stock, result.get("detail"), price, name, image, now, status, now, item_id))
-        updated = get_item(item_id)
-        label = name or item["url"]
-
-        max_price = item["max_price"]
-        was_too_pricey = max_price is not None and item["price"] is not None and item["price"] > max_price
-        if status == IN_STOCK and (item["stock"] != IN_STOCK or (was_too_pricey and price <= max_price)):
-            if max_price is not None and price is not None and price > max_price:
-                log_event(item_id, "in_stock", "%s is in stock but $%.2f is above your max of $%.2f - no alert"
-                          % (label, price, item["max_price"]))
-            else:
-                log_event(item_id, "in_stock", "IN STOCK: %s" % label)
-                ok, message = send_discord(settings, updated, "IN STOCK: %s" % label,
-                                           result.get("detail") or "Go go go!", 0x22C55E)
-                log_event(item_id, "alert" if ok else "error", message)
-        elif status == OUT_OF_STOCK and item["stock"] == IN_STOCK:
-            log_event(item_id, "out_of_stock", "Sold out: %s" % label)
-        elif status == QUEUE and item["status"] != QUEUE:
-            log_event(item_id, "queue", "Queue is up: %s" % label)
-            ok, message = send_discord(settings, updated, "QUEUE IS LIVE: %s" % label,
-                                       "Pokemon Center's waiting room is up - get in line now.", 0xF59E0B)
-            log_event(item_id, "alert" if ok else "error", message)
+        apply_result(item, result, settings)
     finally:
-        item = get_item(item_id)
-        if item:
-            settings = get_settings()
-            backoff = min(2 ** _failures.get(item_id, 0), MAX_BACKOFF / interval_for(item, settings))
-            _next_due[item_id] = time.time() + interval_for(item, settings) * backoff * random.uniform(0.85, 1.15)
+        schedule_next(item_id)
         with _inflight_lock:
             _inflight.discard(item_id)
+
+
+def chrome_handles(item, settings):
+    """True when this item is checked by the Chrome helper instead of from Python."""
+    return ((item["retailer"] == "target" and settings["target_via_chrome"] == "1")
+            or (item["retailer"] == "pokemoncenter" and settings["pc_via_chrome"] == "1"))
 
 
 def scheduler():
     pool = ThreadPoolExecutor(max_workers=4)
     while True:
         now = time.time()
-        for row in query("SELECT id FROM items WHERE enabled = 1"):
+        settings = get_settings()
+        for row in query("SELECT id, retailer FROM items WHERE enabled = 1"):
+            if chrome_handles(row, settings):
+                continue
             item_id = row["id"]
             with _inflight_lock:
                 if item_id in _inflight or _next_due.get(item_id, 0) > now:
@@ -583,15 +682,206 @@ def scheduler():
         time.sleep(1)
 
 
+# ---------------------------------------------------------------- chrome helper
+
+_ext = {"last_seen": 0, "captcha_alerted": False, "open": []}
+_search_due = {}
+
+SEARCH_URLS = {"target": "https://www.target.com/s?searchTerm=%s&sortBy=newest",
+               "pokemoncenter": "https://www.pokemoncenter.com/search/%s"}
+
+
+def ext_connected():
+    return time.time() - _ext["last_seen"] < 75
+
+
+def helper_version():
+    try:
+        with open(HELPER_MANIFEST) as f:
+            return json.load(f).get("version")
+    except (OSError, ValueError):
+        return None
+
+
+def open_in_chrome(item):
+    """Ask the Chrome helper to open an item that just came in stock."""
+    if ext_connected():
+        _ext["open"].append({"url": item["url"], "checkout_url": CHECKOUT_URLS.get(item["retailer"])})
+
+
+def due_searches(settings, now, limit):
+    try:
+        minutes = float(settings["discover_minutes"])
+    except ValueError:
+        minutes = 15
+    if minutes <= 0:
+        return []
+    jobs = []
+    for category in query("SELECT * FROM categories ORDER BY id"):
+        for keyword in [k.strip() for k in (category["keywords"] or "").split(",") if k.strip()]:
+            for site, pattern in SEARCH_URLS.items():
+                key = "%d|%s|%s" % (category["id"], site, keyword)
+                if len(jobs) >= limit or _search_due.get(key, 0) > now:
+                    continue
+                _search_due[key] = now + max(minutes, 5) * 60 * random.uniform(0.9, 1.1)
+                jobs.append({"key": key, "site": site, "url": pattern % urllib.parse.quote(keyword)})
+    return jobs
+
+
+def ext_jobs():
+    _ext["last_seen"] = now = time.time()
+    settings = get_settings()
+    checks = []
+    for item in query("SELECT id, url, retailer FROM items WHERE enabled = 1 ORDER BY id"):
+        if len(checks) < 4 and chrome_handles(item, settings) and _next_due.get(item["id"], 0) <= now:
+            checks.append(item)
+            schedule_next(item["id"])  # reserve it so the next poll doesn't hand it out again
+    opens, _ext["open"] = _ext["open"], []
+    return {"checks": checks, "searches": due_searches(settings, now, 2), "open": opens,
+            "auto_cart": settings["auto_cart"] == "1", "ext_version": helper_version()}
+
+
+def ext_report(body):
+    item = get_item(int(body.get("id") or 0))
+    if not item:
+        return
+    settings = get_settings()
+    try:
+        if body.get("captcha"):
+            record_failure(item, "%s wants to know you're human - open Chrome, click the pinned tab and complete "
+                                 "the check" % RETAILER_NAMES.get(item["retailer"], "The store"), True)
+            if not _ext["captcha_alerted"]:
+                _ext["captcha_alerted"] = True
+                send_discord(settings, item, "Human check needed in Chrome",
+                             "Open Chrome on your computer, click the pinned tab and complete the check so "
+                             "monitoring can continue.", 0xF59E0B)
+            return
+        _ext["captcha_alerted"] = False
+        if body.get("error"):
+            record_failure(item, str(body["error"])[:300], False)
+            return
+        if body.get("queue"):
+            result = {"status": QUEUE, "detail": "A waiting-room queue is up - a drop is probably live!"}
+        else:
+            status = body.get("status")
+            result = {"status": status if status in (IN_STOCK, OUT_OF_STOCK) else UNKNOWN,
+                      "price": parse_price(body.get("price")),
+                      "name": (str(body.get("name") or "").strip()[:300] or None),
+                      "image": body.get("image") if re.match(r"^https?://", str(body.get("image") or "")) else None,
+                      "seller": (str(body.get("seller") or "").strip()[:80] or None),
+                      "detail": body.get("detail")}
+        apply_result(item, result, settings)
+    finally:
+        schedule_next(item["id"])
+
+
+def listing_key(url):
+    if detect_retailer(url) == "target":
+        tcin = target_tcin(url)
+        return "target:" + tcin if tcin else None
+    match = re.search(r"pokemoncenter\.com/product/([\w-]+)", url)
+    return "pokemoncenter:" + match.group(1) if match else None
+
+
+def ext_discover(body):
+    parts = str(body.get("key") or "").split("|", 2)
+    if len(parts) != 3:
+        return
+    category_id, site, keyword = int(parts[0]), parts[1], parts[2]
+    categories = query("SELECT * FROM categories WHERE id = ?", (category_id,))
+    if not categories:
+        return
+    category = categories[0]
+    if body.get("captcha"):
+        log_event(None, "error", "Discover: %s wants a human check - open Chrome's pinned tab"
+                  % RETAILER_NAMES.get(site, site))
+        return
+    if body.get("error"):
+        return
+    seeded_key = "seeded|" + body["key"]
+    first_run = not query("SELECT 1 FROM settings WHERE key = ?", (seeded_key,))
+    watching = {listing_key(row["url"]) for row in query("SELECT url FROM items")}
+    settings = get_settings()
+    found = 0
+    for r in (body.get("results") or [])[:80]:
+        url = str(r.get("url") or "").split("?")[0]
+        key = listing_key(url)
+        name = str(r.get("name") or "").strip()[:300]
+        if not key or "pok" not in name.lower():
+            continue
+        found += 1
+        price = parse_price(r.get("price"))
+        seller = str(r.get("seller") or "").strip()[:80] or None
+        image = r.get("image") if re.match(r"^https?://", str(r.get("image") or "")) else None
+        flag = None
+        if seller and not first_party(site, seller):
+            flag = "3rd-party seller: %s" % seller
+        elif category["max_price"] is not None and price is not None and price > category["max_price"]:
+            flag = "Above your max price of $%.2f" % category["max_price"]
+        if query("SELECT 1 FROM discoveries WHERE key = ?", (key,)):
+            execute("UPDATE discoveries SET price = COALESCE(?, price), image = COALESCE(image, ?), flag = ? "
+                    "WHERE key = ?", (price, image, flag, key))
+            continue
+        status = "added" if key in watching else "new"
+        execute("""INSERT INTO discoveries(key, category_id, site, url, name, price, image, seller, flag, status,
+                   found_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (key, category_id, site, url, name, price, image, seller, flag, status, time.time()))
+        if status == "new" and not first_run and not flag:
+            log_event(None, "discover", "New listing (%s): %s" % (category["name"], name))
+            send_discord(settings, {"url": url, "retailer": site, "price": price, "image": image},
+                         "NEW LISTING: %s" % name,
+                         'Found on %s while searching "%s" (%s). Add it to your watchlist from the dashboard.'
+                         % (RETAILER_NAMES.get(site, site), keyword, category["name"]), 0x8B5CF6, ping=False)
+    if first_run:
+        execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, '1')", (seeded_key,))
+        log_event(None, "discover", 'Discover: first search of %s for "%s" found %d listings (no alerts the '
+                  'first time)' % (RETAILER_NAMES.get(site, site), keyword, found))
+
+
+# ---------------------------------------------------------------- categories
+
+def save_category(body, category_id=None):
+    name = str(body.get("name") or "").strip()[:60]
+    if not name:
+        raise ValueError("Give the category a name")
+    keywords = ", ".join(k.strip() for k in str(body.get("keywords") or "").split(",") if k.strip())[:300]
+    raw = str(body.get("max_price") or "").strip()
+    max_price = parse_price(raw) if raw else None
+    if category_id is None:
+        return execute("INSERT INTO categories(name, keywords, max_price) VALUES (?, ?, ?)", (name, keywords, max_price))
+    execute("UPDATE categories SET name = ?, keywords = ?, max_price = ? WHERE id = ?",
+            (name, keywords, max_price, category_id))
+    return category_id
+
+
+def delete_category(category_id):
+    execute("UPDATE items SET category_id = NULL WHERE category_id = ?", (category_id,))
+    execute("DELETE FROM discoveries WHERE category_id = ? AND status != 'added'", (category_id,))
+    execute("DELETE FROM categories WHERE id = ?", (category_id,))
+
+
+def _category_id(raw):
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if query("SELECT 1 FROM categories WHERE id = ?", (value,)) else None
+
+
 # ---------------------------------------------------------------- web dashboard
 
 def state():
     events = query("""SELECT e.*, i.name AS item_name FROM events e
                       LEFT JOIN items i ON i.id = e.item_id ORDER BY e.id DESC LIMIT 80""")
     items = query("SELECT * FROM items ORDER BY created_at DESC")
+    settings = get_settings()
     for item in items:
         item["next_check"] = _next_due.get(item["id"])
-    return {"items": items, "events": events, "settings": get_settings(),
+        item["via_chrome"] = chrome_handles(item, settings)
+    return {"items": items, "events": events, "settings": settings,
+            "categories": query("SELECT * FROM categories ORDER BY id"),
+            "discoveries": query("SELECT * FROM discoveries WHERE status = 'new' ORDER BY found_at DESC LIMIT 60"),
+            "chrome": {"connected": ext_connected(), "last_seen": _ext["last_seen"] or None},
             "now": time.time(), "started": START_TIME,
             "version": VERSION, "update_available": _update["latest"]}
 
@@ -604,8 +894,13 @@ def add_item(body):
     if retailer == "target" and not target_tcin(url):
         raise ValueError("That Target link has no item number - open the product page and copy its link")
     max_price = parse_price(body.get("max_price")) if str(body.get("max_price") or "").strip() else None
-    item_id = execute("INSERT INTO items(url, retailer, max_price, created_at) VALUES (?, ?, ?, ?)",
-                      (url, retailer, max_price, time.time()))
+    key = listing_key(url)
+    if key and any(listing_key(row["url"]) == key for row in query("SELECT url FROM items")):
+        raise ValueError("You're already watching that product")
+    item_id = execute("INSERT INTO items(url, retailer, max_price, category_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                      (url, retailer, max_price, _category_id(body.get("category_id")), time.time()))
+    if key:
+        execute("UPDATE discoveries SET status = 'added' WHERE key = ?", (key,))
     log_event(item_id, "added", "Now watching %s" % url)
     _next_due[item_id] = 0
     threading.Thread(target=fill_details, args=(item_id,), daemon=True).start()
@@ -644,13 +939,31 @@ def install_update():
             downloaded[name] = response.read()
     compile(downloaded["app.py"], "app.py", "exec")  # never install a broken download
     for name, data in downloaded.items():
-        path = os.path.join(HERE, name)
+        path = os.path.join(HERE, *name.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         temp = path + ".new"
         with open(temp, "wb") as f:
             f.write(data)
         if os.path.exists(path):
             os.chmod(temp, os.stat(path).st_mode)
         os.replace(temp, path)
+
+
+def download_missing_files():
+    """Fetch files added in newer versions that an older updater didn't know to download."""
+    for name in UPDATE_FILES:
+        path = os.path.join(HERE, *name.split("/"))
+        if os.path.exists(path):
+            continue
+        try:
+            request = urllib.request.Request(UPDATE_BASE + urllib.parse.quote(name), headers={"User-Agent": USER_AGENT})
+            with urllib.request.urlopen(request, timeout=20) as response:
+                data = response.read()
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as f:
+                f.write(data)
+        except Exception as e:
+            print("Couldn't download %s: %s" % (name, e))
 
 
 def relaunch(extra_args):
@@ -710,6 +1023,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, f.read(), "text/html; charset=utf-8")
         elif path == "/api/state":
             self._json(state())
+        elif path == "/api/ext/jobs":
+            self._json(ext_jobs())
         else:
             self._json({"error": "not found"}, 404)
 
@@ -721,6 +1036,41 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/items":
                 self._json({"id": add_item(body)})
+                return
+            if path == "/api/ext/report":
+                ext_report(body)
+                self._json({"ok": True})
+                return
+            if path == "/api/ext/discover":
+                ext_discover(body)
+                self._json({"ok": True})
+                return
+            if path == "/api/categories":
+                self._json({"id": save_category(body)})
+                return
+            match = re.match(r"^/api/categories/(\d+)$", path)
+            if match:
+                self._json({"id": save_category(body, int(match.group(1)))})
+                return
+            if path == "/api/discoveries/dismiss-all":
+                execute("UPDATE discoveries SET status = 'dismissed' WHERE status = 'new'")
+                self._json({"ok": True})
+                return
+            match = re.match(r"^/api/discoveries/(\d+)/(add|dismiss)$", path)
+            if match:
+                rows = query("SELECT * FROM discoveries WHERE id = ?", (int(match.group(1)),))
+                if not rows:
+                    self._json({"error": "Not found"}, 404)
+                    return
+                found = rows[0]
+                if match.group(2) == "add":
+                    add_item({"url": found["url"], "category_id": found["category_id"],
+                              "max_price": body.get("max_price")})
+                    execute("UPDATE items SET name = COALESCE(name, ?), image = COALESCE(image, ?) WHERE url = ?",
+                            (found["name"], found["image"], found["url"]))
+                execute("UPDATE discoveries SET status = ? WHERE id = ?",
+                        ("added" if match.group(2) == "add" else "dismissed", found["id"]))
+                self._json({"ok": True})
                 return
             if path == "/api/settings":
                 save_settings(body)
@@ -761,6 +1111,9 @@ class Handler(BaseHTTPRequestHandler):
                         raw = str(body.get("max_price") or "").strip()
                         execute("UPDATE items SET max_price = ? WHERE id = ?",
                                 (parse_price(raw) if raw else None, item_id))
+                    if "category_id" in body:
+                        execute("UPDATE items SET category_id = ? WHERE id = ?",
+                                (_category_id(body.get("category_id")), item_id))
                     if "image" in body:
                         image = str(body.get("image") or "").strip()
                         if image and not re.match(r"^https?://", image):
@@ -775,7 +1128,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         if not self._local_only():
             return
-        match = re.match(r"^/api/items/(\d+)$", urllib.parse.urlparse(self.path).path)
+        path = urllib.parse.urlparse(self.path).path
+        match = re.match(r"^/api/categories/(\d+)$", path)
+        if match:
+            delete_category(int(match.group(1)))
+            self._json({"ok": True})
+            return
+        match = re.match(r"^/api/items/(\d+)$", path)
         if not match:
             self._json({"error": "not found"}, 404)
             return
@@ -798,6 +1157,7 @@ def main():
                 relaunch(["--no-update"])
             except Exception as e:
                 print("Update failed (%s) - starting the current version." % e)
+    download_missing_files()
     init_db()
     url = "http://localhost:%d" % PORT
     try:

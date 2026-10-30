@@ -40,7 +40,41 @@ That's it. Next time, just double-click the Start file again. Your watchlist is 
 
 ---
 
-## Tips
+## Chrome helper (for Target, and for Discover)
+
+Target blocks automated checks, so Target items are checked by a small Chrome extension
+inside **your own Chrome**. It opens your watched pages one at a time in a pinned tab and
+reads the stock, price and seller, the same as you hitting refresh. It also runs **Discover**.
+
+**Install it once:**
+1. Open Chrome and type `chrome://extensions` in the address bar.
+2. Turn on **Developer mode** (switch in the top-right corner).
+3. Click **Load unpacked** and pick the **`chrome-helper`** folder inside your monitor folder.
+4. Pin it: click the puzzle-piece icon in Chrome's toolbar, then the pin next to "Restock Monitor Helper".
+
+The dashboard chip should change to **Chrome helper connected** within 30 seconds.
+Keep Chrome open (it can be minimized). The helper updates itself along with the monitor.
+
+- **Badge "off":** the monitor isn't running. Start it.
+- **Badge "!":** Target or Pokémon Center wants a human check. Click the pinned tab and do it.
+  You'll also get a Discord message. The helper never solves these for you.
+- **Auto add-to-cart (optional, in Settings):** when something comes in stock, the helper
+  opens it, clicks Add to cart and takes you to checkout. **It never presses Place order.** You do.
+
+## Categories, Discover and retail-only buying
+
+- **Categories** (e.g. Ascended Heroes, Prismatic Evolutions, 30th Celebration) group your
+  watchlist. Each has **search words**, which Discover uses, and a **Max $**.
+- **Discover** searches Target and Pokémon Center for each category's search words every
+  15 minutes and alerts you on Discord when a **new** product listing appears. Click **Watch**
+  to add it. The first search of each category only fills the list, without alerts.
+- **Retail only:** with "Only alert when sold by the store itself" on (the default), items
+  sold by **third-party sellers** on Target (marked "Sold and shipped by ...") never alert you.
+  They show as **3rd-party only**.
+- **Max $** is your second safety net. Set it close to retail. Rough US retail prices
+  (check the current price for each product): Elite Trainer Box about $50-60,
+  Booster Bundle about $27-30, Pokémon Center ETB about $60. A $150 "ETB" is a reseller.
+
 - **Your computer must be on and awake.** Turn off sleep mode while you're monitoring
   (Windows: Settings → System → Power; Mac: System Settings → Battery/Energy → prevent sleep).
 - **Be logged in ahead of time** on Target and Pokémon Center with your address and card
@@ -56,6 +90,7 @@ That's it. Next time, just double-click the Start file again. Your watchlist is 
 | Status | Meaning |
 |---|---|
 | **In stock** | Buy it! You got a Discord alert. |
+| **3rd-party only** | In stock, but only from a reseller. No alert. |
 | **Sold out** | Watching. You'll be alerted when it changes. |
 | **Queue live** | Pokémon Center's waiting room is up. Get in line. |
 | **Blocked** | The store showed a bot check. The monitor slows down on its own and retries. |
@@ -64,5 +99,6 @@ That's it. Next time, just double-click the Start file again. Your watchlist is 
 ## Files
 - `app.py`: the monitor and the dashboard server
 - `dashboard.html`: the dashboard page
+- `chrome-helper/`: the Chrome extension
 - `monitor.db`: your saved watchlist, settings and history (created automatically).
   Delete it to start fresh.
