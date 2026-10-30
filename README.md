@@ -61,6 +61,35 @@ Keep Chrome open (it can be minimized). The helper updates itself along with the
 - **Auto add-to-cart (optional, in Settings):** when something comes in stock, the helper
   opens it, clicks Add to cart and takes you to checkout. **It never presses Place order.** You do.
 
+## How a restock gets confirmed (no false alarms)
+
+1. **Quick check:** every few seconds the helper asks Target's stock service, from a pinned
+   target.com tab in your Chrome, whether each item is in stock. This is the same request
+   target.com itself makes.
+2. **Page check:** when a quick check says "in stock", the helper immediately loads the real
+   product page and looks only at **that product's own buy button**. "Add to cart" buttons on
+   recommended-product carousels are ignored, since those caused the false alarms. It also reads
+   who the seller is.
+3. Only when both agree, and the seller is Target and the price is under your max, does
+   Discord get pinged. A reading that doesn't hold up is ignored and noted in Activity.
+
+Quick checks share one timer: with "2 seconds between quick checks" and 4 Target items,
+each item is checked about every 8 seconds. Fewer items means faster checks per item. Going below 2
+seconds makes Target more likely to show a human check.
+
+## Discord: only what matters
+
+By default Discord gets just two kinds of messages: **confirmed in stock** (with @everyone)
+and **order placed**. Queues, human checks and new Discover listings stay on the dashboard,
+unless you tick "Also post queues, human checks and new listings to Discord" in Settings.
+
+## Order confirmations
+
+The helper never presses "Place order". You do. When you do, and the store shows its
+"Thank you for your order" page in Chrome, the helper reads the order number and total and
+you get an **ORDER PLACED** message on Discord. It also shows under **Orders placed** on the
+dashboard. If you check out on your phone instead, look for the store's confirmation email.
+
 ## Categories, Discover and retail-only buying
 
 - **Categories** (e.g. Ascended Heroes, Prismatic Evolutions, 30th Celebration) group your
@@ -90,7 +119,8 @@ Keep Chrome open (it can be minimized). The helper updates itself along with the
 ## What the statuses mean
 | Status | Meaning |
 |---|---|
-| **In stock** | Buy it! You got a Discord alert. |
+| **Confirming…** | One check said in stock. Double-checking the real page before alerting. |
+| **In stock** | Confirmed by two checks. Buy it! You got a Discord alert. |
 | **3rd-party only** | In stock, but only from a reseller. No alert. |
 | **Sold out** | Watching. You'll be alerted when it changes. |
 | **Queue live** | Pokémon Center's waiting room is up. Get in line. |

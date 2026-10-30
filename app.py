@@ -57,6 +57,9 @@ DEFAULT_SETTINGS = {
     "pc_via_chrome": "0",
     "auto_cart": "0",
     "discover_minutes": "15",
+    "discord_extras": "0",
+    "target_fast": "1",
+    "target_fast_gap": "3",
 }
 
 IN_STOCK = "in_stock"
@@ -66,10 +69,11 @@ QUEUE = "queue"
 BLOCKED = "blocked"
 ERROR = "error"
 MARKETPLACE = "marketplace"   # in stock, but only from a third-party seller
+CONFIRMING = "confirming"     # one reading said in stock; double-checking before alerting
 
 START_TIME = time.time()
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 UPDATE_BASE = "https://raw.githubusercontent.com/dukearktouros/pokemon-restock-monitor/main/"
 UPDATE_FILES = ["app.py", "dashboard.html", "README.md", "Start (Windows).bat", "Start (Mac).command",
                 "chrome-helper/manifest.json", "chrome-helper/background.js"]
@@ -127,6 +131,16 @@ SCHEMA = [
         found_at REAL NOT NULL
     )""",
 ]
+
+SCHEMA.append("""CREATE TABLE IF NOT EXISTS orders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts REAL NOT NULL,
+        retailer TEXT NOT NULL,
+        order_number TEXT,
+        total REAL,
+        items TEXT,
+        url TEXT
+    )""")
 
 MIGRATIONS = [("items", "category_id", "INTEGER"), ("items", "seller", "TEXT")]
 
@@ -576,13 +590,41 @@ def record_failure(item, message, blocked):
             (BLOCKED if blocked else ERROR, message, time.time(), item["id"]))
 
 
-def apply_result(item, result, settings):
-    """Save a successful check and send whatever alert it calls for."""
+_pending_confirm = {}   # item id -> how the first in-stock reading was made
+_quick_ignored_until = {}  # item id -> time; quick checks proven wrong are ignored until then
+_last_ignored_log = {}
+
+
+def apply_result(item, result, settings, method="page"):
+    """Save a successful check and send whatever alert it calls for.
+
+    A new in-stock reading is never trusted on its own: it has to be confirmed by a second
+    reading - for Target, by actually loading the product page - before anything alerts.
+    """
     item_id = item["id"]
     _failures[item_id] = 0
     now = time.time()
     status = result["status"]
     seller = result.get("seller") or None
+    if method == "api" and status == IN_STOCK and item["stock"] != IN_STOCK \
+            and _quick_ignored_until.get(item_id, 0) > now:
+        execute("UPDATE items SET last_checked = ? WHERE id = ?", (now, item_id))
+        return
+    first = _pending_confirm.pop(item_id, None)
+    if status == IN_STOCK and item["stock"] != IN_STOCK:
+        needs_page = item["retailer"] == "target" and chrome_handles(item, settings)
+        if first is None or (needs_page and method != "page"):
+            _pending_confirm[item_id] = method
+            execute("UPDATE items SET status = ?, last_checked = ?, last_error = NULL WHERE id = ?",
+                    (CONFIRMING, now, item_id))
+            return
+    elif first is not None:
+        if first == "api":
+            _quick_ignored_until[item_id] = now + 60
+        if _last_ignored_log.get(item_id, 0) < now - 600:
+            _last_ignored_log[item_id] = now
+            log_event(item_id, "skipped", "Ignored an in-stock reading for %s that didn't hold up on the re-check"
+                      % (item["name"] or item["url"]))
     third_party = (status == IN_STOCK and seller and not first_party(item["retailer"], seller)
                    and settings["retail_only"] == "1")
     if third_party:
@@ -607,7 +649,10 @@ def apply_result(item, result, settings):
 
     max_price = effective_max(item)
     was_too_pricey = max_price is not None and item["price"] is not None and item["price"] > max_price
-    if third_party and item["status"] != MARKETPLACE:
+    already_known = _quick_ignored_until.get(item_id, 0) > now or item["status"] == MARKETPLACE
+    if third_party:
+        _quick_ignored_until[item_id] = now + 600  # the quick check can't see sellers
+    if third_party and not already_known:
         log_event(item_id, "skipped", "%s is only available from 3rd-party seller %s - no alert" % (label, seller))
     elif status == IN_STOCK and (item["stock"] != IN_STOCK or (was_too_pricey and price <= max_price)):
         if max_price is not None and price is not None and price > max_price:
@@ -616,20 +661,24 @@ def apply_result(item, result, settings):
         else:
             log_event(item_id, "in_stock", "IN STOCK: %s" % label)
             ok, message = send_discord(settings, updated, "IN STOCK: %s" % label,
-                                       detail or "Go go go!", 0x22C55E)
+                                       "Confirmed by two checks. " + (detail or ""), 0x22C55E)
             log_event(item_id, "alert" if ok else "error", message)
             open_in_chrome(updated)
     elif status == OUT_OF_STOCK and item["stock"] == IN_STOCK:
         log_event(item_id, "out_of_stock", "Sold out: %s" % label)
     elif status == QUEUE and item["status"] != QUEUE:
         log_event(item_id, "queue", "Queue is up: %s" % label)
-        ok, message = send_discord(settings, updated, "QUEUE IS LIVE: %s" % label,
-                                   "Pokemon Center's waiting room is up - get in line now.", 0xF59E0B)
-        log_event(item_id, "alert" if ok else "error", message)
+        if settings["discord_extras"] == "1":
+            ok, message = send_discord(settings, updated, "QUEUE IS LIVE: %s" % label,
+                                       "Pokemon Center's waiting room is up - get in line now.", 0xF59E0B)
+            log_event(item_id, "alert" if ok else "error", message)
         open_in_chrome(updated)
 
 
 def schedule_next(item_id):
+    if item_id in _pending_confirm:
+        _next_due[item_id] = time.time() + 1  # re-check right away
+        return
     item = get_item(item_id)
     if item:
         interval = interval_for(item, get_settings())
@@ -728,16 +777,30 @@ def due_searches(settings, now, limit):
     return jobs
 
 
-def ext_jobs():
+def ext_jobs(limit=4):
     _ext["last_seen"] = now = time.time()
     settings = get_settings()
-    checks = []
-    for item in query("SELECT id, url, retailer FROM items WHERE enabled = 1 ORDER BY id"):
-        if len(checks) < 4 and chrome_handles(item, settings) and _next_due.get(item["id"], 0) <= now:
+    checks, fast = [], []
+    items = query("SELECT id, url, retailer FROM items WHERE enabled = 1 ORDER BY id")
+    # Re-checks that confirm an in-stock reading jump the queue.
+    items.sort(key=lambda i: i["id"] not in _pending_confirm)
+    for item in items:
+        if not chrome_handles(item, settings):
+            continue
+        if item["retailer"] == "target" and settings["target_fast"] == "1" and item["id"] not in _pending_confirm:
+            fast.append({"id": item["id"], "tcin": target_tcin(item["url"])})
+        if len(checks) < limit and _next_due.get(item["id"], 0) <= now:
             checks.append(item)
-            schedule_next(item["id"])  # reserve it so the next poll doesn't hand it out again
+            _next_due[item["id"]] = now + 60  # reserved; the report schedules the real next check
+    searches = due_searches(settings, now, 1 if checks else limit)
     opens, _ext["open"] = _ext["open"], []
-    return {"checks": checks, "searches": due_searches(settings, now, 2), "open": opens,
+    try:
+        gap = max(2.0, float(settings["target_fast_gap"]))
+    except ValueError:
+        gap = 3.0
+    return {"checks": checks, "searches": searches, "open": opens,
+            "fast": {"items": fast, "gap": gap, "store_id": settings["target_store_id"].strip(),
+                     "zip": settings["target_zip"].strip(), "key": TARGET_API_KEY},
             "auto_cart": settings["auto_cart"] == "1", "ext_version": helper_version()}
 
 
@@ -750,14 +813,17 @@ def ext_report(body):
         if body.get("captcha"):
             record_failure(item, "%s wants to know you're human - open Chrome, click the pinned tab and complete "
                                  "the check" % RETAILER_NAMES.get(item["retailer"], "The store"), True)
-            if not _ext["captcha_alerted"]:
+            if not _ext["captcha_alerted"] and settings["discord_extras"] == "1":
                 _ext["captcha_alerted"] = True
                 send_discord(settings, item, "Human check needed in Chrome",
                              "Open Chrome on your computer, click the pinned tab and complete the check so "
                              "monitoring can continue.", 0xF59E0B)
             return
         _ext["captcha_alerted"] = False
+        method = "api" if body.get("method") == "api" else "page"
         if body.get("error"):
+            if method == "api":
+                return  # the quick check failed; the regular page check still covers this item
             record_failure(item, str(body["error"])[:300], False)
             return
         if body.get("queue"):
@@ -770,7 +836,7 @@ def ext_report(body):
                       "image": body.get("image") if re.match(r"^https?://", str(body.get("image") or "")) else None,
                       "seller": (str(body.get("seller") or "").strip()[:80] or None),
                       "detail": body.get("detail")}
-        apply_result(item, result, settings)
+        apply_result(item, result, settings, method)
     finally:
         schedule_next(item["id"])
 
@@ -828,14 +894,40 @@ def ext_discover(body):
                 (key, category_id, site, url, name, price, image, seller, flag, status, time.time()))
         if status == "new" and not first_run and not flag:
             log_event(None, "discover", "New listing (%s): %s" % (category["name"], name))
-            send_discord(settings, {"url": url, "retailer": site, "price": price, "image": image},
-                         "NEW LISTING: %s" % name,
-                         'Found on %s while searching "%s" (%s). Add it to your watchlist from the dashboard.'
-                         % (RETAILER_NAMES.get(site, site), keyword, category["name"]), 0x8B5CF6, ping=False)
+            if settings["discord_extras"] == "1":
+                send_discord(settings, {"url": url, "retailer": site, "price": price, "image": image},
+                             "NEW LISTING: %s" % name,
+                             'Found on %s while searching "%s" (%s). Add it to your watchlist from the dashboard.'
+                             % (RETAILER_NAMES.get(site, site), keyword, category["name"]), 0x8B5CF6, ping=False)
     if first_run:
         execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?, '1')", (seeded_key,))
         log_event(None, "discover", 'Discover: first search of %s for "%s" found %d listings (no alerts the '
                   'first time)' % (RETAILER_NAMES.get(site, site), keyword, found))
+
+
+def ext_order(body):
+    """The helper saw an order-confirmation page: record it and tell Discord."""
+    retailer = detect_retailer(str(body.get("url") or ""))
+    number = re.sub(r"[^A-Za-z0-9-]", "", str(body.get("order_number") or ""))[:40] or None
+    if number and query("SELECT 1 FROM orders WHERE order_number = ? AND retailer = ?", (number, retailer)):
+        return
+    text = str(body.get("text") or "").lower()
+    bought = [i for i in query("SELECT * FROM items")
+              if i["name"] and i["name"].lower()[:30] in text]
+    names = ", ".join(i["name"] for i in bought)[:500] or None
+    total = parse_price(body.get("total"))
+    execute("INSERT INTO orders(ts, retailer, order_number, total, items, url) VALUES (?, ?, ?, ?, ?, ?)",
+            (time.time(), retailer, number, total, names, str(body.get("url") or "")[:300]))
+    label = RETAILER_NAMES.get(retailer, "Store")
+    log_event(bought[0]["id"] if bought else None, "order",
+              "ORDER PLACED at %s%s" % (label, " - order #%s" % number if number else ""))
+    lines = ["Order #: %s" % (number or "see your email")]
+    if total is not None:
+        lines.append("Total: $%.2f" % total)
+    lines.append("Items: %s" % (names or "check the order page"))
+    send_discord(get_settings(), {"url": body.get("url"), "retailer": retailer, "price": total,
+                                  "image": bought[0]["image"] if bought else None},
+                 "ORDER PLACED at %s" % label, "\n".join(lines), 0x10B981)
 
 
 # ---------------------------------------------------------------- categories
@@ -881,6 +973,7 @@ def state():
     return {"items": items, "events": events, "settings": settings,
             "categories": query("SELECT * FROM categories ORDER BY id"),
             "discoveries": query("SELECT * FROM discoveries WHERE status = 'new' ORDER BY found_at DESC LIMIT 60"),
+            "orders": query("SELECT * FROM orders ORDER BY ts DESC LIMIT 30"),
             "chrome": {"connected": ext_connected(), "last_seen": _ext["last_seen"] or None},
             "now": time.time(), "started": START_TIME,
             "version": VERSION, "update_available": _update["latest"]}
@@ -1024,7 +1117,12 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/state":
             self._json(state())
         elif path == "/api/ext/jobs":
-            self._json(ext_jobs())
+            query_args = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            try:
+                limit = max(1, min(4, int(query_args.get("max", ["4"])[0])))
+            except ValueError:
+                limit = 4
+            self._json(ext_jobs(limit))
         else:
             self._json({"error": "not found"}, 404)
 
@@ -1039,6 +1137,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/ext/report":
                 ext_report(body)
+                self._json({"ok": True})
+                return
+            if path == "/api/ext/order":
+                ext_order(body)
                 self._json({"ok": True})
                 return
             if path == "/api/ext/discover":

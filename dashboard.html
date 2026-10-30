@@ -80,6 +80,13 @@
   .tag.warn { background: var(--warn-bg); color: var(--warn); }
   .empty { color: var(--muted); padding: 18px 0 6px; }
   .pill.marketplace { background: var(--warn-bg); color: var(--warn); }
+  .pill.confirming { background: var(--info-bg); color: var(--info); }
+  .feed .order { color: var(--ok); font-weight: 700; }
+  .orders { list-style: none; margin: 0; padding: 0; }
+  .orders li { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; padding: 8px 0;
+               border-top: 1px solid var(--border); font-size: 14px; }
+  .orders li:first-child { border-top: 0; }
+  .orders .what { color: var(--muted); font-size: 13px; }
   select { font: inherit; color: var(--text); background: var(--panel-2); border: 1px solid var(--border);
            border-radius: 8px; padding: 8px 10px; min-width: 0; }
   .meta select { padding: 1px 4px; font-size: 12px; border-radius: 5px; }
@@ -166,6 +173,11 @@
     <div class="items" id="discoveries"></div>
   </section>
 
+  <section class="panel" id="ordersPanel" hidden>
+    <h2>Orders placed</h2>
+    <ul class="orders" id="orders"></ul>
+  </section>
+
   <div class="cols">
     <div>
       <section class="panel" id="categoriesPanel">
@@ -195,10 +207,15 @@
         <input id="discord_webhook" name="discord_webhook" placeholder="https://discord.com/api/webhooks/…">
         <div class="hint">Discord server → Edit channel → Integrations → Webhooks → New → Copy URL.</div>
         <label class="check"><input type="checkbox" name="ping_everyone"> Ping @everyone (makes your phone buzz)</label>
+        <label class="check"><input type="checkbox" name="discord_extras"> Also post queues, human checks and new listings to Discord</label>
+        <div class="hint">Off = Discord only gets confirmed in-stock alerts and orders you placed.</div>
         <label class="check"><input type="checkbox" name="retail_only"> Only alert when sold by the store itself (skip 3rd-party sellers)</label>
 
         <label>Chrome helper</label>
         <label class="check"><input type="checkbox" name="target_via_chrome"> Check Target items in Chrome</label>
+        <label class="check"><input type="checkbox" name="target_fast"> Quick Target checks</label>
+        <label for="target_fast_gap">Seconds between quick checks (min 2, shared by all Target items)</label>
+        <input id="target_fast_gap" name="target_fast_gap" inputmode="decimal">
         <label class="check"><input type="checkbox" name="pc_via_chrome"> Check Pokémon Center items in Chrome</label>
         <label class="check"><input type="checkbox" name="auto_cart"> When in stock: add to cart and open checkout (you press Place order)</label>
         <label for="discover_minutes">Discover searches every (minutes, 0 = off)</label>
@@ -232,7 +249,7 @@
 <script>
 const $ = (sel) => document.querySelector(sel);
 const STATUS_LABEL = { in_stock: "In stock", out_of_stock: "Sold out", unknown: "Checking…",
-  queue: "Queue live", blocked: "Blocked", error: "Error", marketplace: "3rd-party only" };
+  queue: "Queue live", blocked: "Blocked", error: "Error", marketplace: "3rd-party only", confirming: "Confirming…" };
 const STORE = { target: "Target", pokemoncenter: "Pokémon Center", walmart: "Walmart",
   bestbuy: "Best Buy", gamestop: "GameStop", amazon: "Amazon", other: "Other" };
 let latest = null;
@@ -337,6 +354,13 @@ function render() {
       </div>
     </div>`;
   }).join("") : `<div class="empty">${items.length ? "Nothing in this category yet." : "Nothing watched yet. Paste a product link above to start."}</div>`;
+
+  const orders = latest.orders;
+  $("#ordersPanel").hidden = !orders.length;
+  $("#orders").innerHTML = orders.map((o) => `<li>
+    <span><strong>${esc(STORE[o.retailer] || o.retailer)}</strong>${o.order_number ? " · order #" + esc(o.order_number) : ""}
+      <div class="what">${esc(o.items || "Items: see the order page")}</div></span>
+    <span>${o.total != null ? money(o.total) : ""} · ${clock(o.ts)} ${new Date(o.ts * 1000).toLocaleDateString()}</span></li>`).join("");
 
   const finds = latest.discoveries;
   $("#discoverNote").innerHTML = latest.chrome.connected ? "" :
