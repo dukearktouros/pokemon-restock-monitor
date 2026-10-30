@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Restock Monitor</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --panel: #ffffff; --panel-2: #f0f1f4; --text: #16181d; --muted: #646b78;
+    --border: #e1e4ea; --accent: #e3350d; --accent-text: #ffffff;
+    --ok: #15803d; --ok-bg: #dcfce7; --bad: #b91c1c; --bad-bg: #fee2e2;
+    --warn: #a16207; --warn-bg: #fef3c7; --info: #1d4ed8; --info-bg: #dbeafe; --neutral-bg: #eceef2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --panel: #171a21; --panel-2: #1e222b; --text: #eceef2; --muted: #9aa1ad;
+      --border: #2a2f3a; --accent: #ff4b2b; --accent-text: #ffffff;
+      --ok: #4ade80; --ok-bg: #14321f; --bad: #f87171; --bad-bg: #3a1717;
+      --warn: #fbbf24; --warn-bg: #3a2c0d; --info: #93c5fd; --info-bg: #172a4a; --neutral-bg: #252a34;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 20px 16px 48px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
+  h1 { font-size: 22px; margin: 0; display: flex; align-items: center; gap: 10px; }
+  .ball { width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--text);
+          background: linear-gradient(var(--accent) 0 46%, var(--text) 46% 54%, var(--panel) 54%); position: relative; }
+  .ball::after { content: ""; position: absolute; inset: 6px; border-radius: 50%; background: var(--panel); border: 2px solid var(--text); }
+  h2 { font-size: 15px; margin: 0 0 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; }
+  .chip { font-size: 13px; padding: 4px 10px; border-radius: 999px; background: var(--panel); border: 1px solid var(--border); }
+  .chip.ok { color: var(--ok); } .chip.bad { color: var(--bad); }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+  .banner { background: var(--warn-bg); color: var(--warn); border-radius: 10px; padding: 10px 14px; margin-bottom: 16px; }
+  .banner a { color: inherit; font-weight: 600; }
+  .banner.update { background: var(--info-bg); color: var(--info); display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .banner[hidden] { display: none; }
+  footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 8px; }
+  form.add { display: flex; gap: 8px; flex-wrap: wrap; }
+  input { font: inherit; color: var(--text); background: var(--panel-2); border: 1px solid var(--border);
+          border-radius: 8px; padding: 9px 11px; min-width: 0; }
+  input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  form.add .url { flex: 1 1 380px; }
+  form.add .max { flex: 0 1 130px; }
+  button { font: inherit; cursor: pointer; border-radius: 8px; padding: 8px 14px; border: 1px solid var(--border);
+           background: var(--panel-2); color: var(--text); }
+  button:hover { border-color: var(--muted); }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 600; }
+  button.small { padding: 4px 9px; font-size: 13px; }
+  .msg { font-size: 13px; margin-top: 8px; min-height: 1em; }
+  .msg.err { color: var(--bad); } .msg.good { color: var(--ok); }
+
+  .items { display: flex; flex-direction: column; }
+  .item { display: grid; grid-template-columns: 56px 1fr auto; gap: 12px; align-items: center;
+          padding: 12px 0; border-top: 1px solid var(--border); }
+  .item:first-child { border-top: 0; }
+  .item.paused { opacity: .55; }
+  .thumb { width: 56px; height: 56px; border-radius: 8px; background: var(--panel-2); object-fit: contain; cursor: pointer;
+          display: flex; align-items: center; justify-content: center; font-size: 11px; color: var(--muted); text-align: center; }
+  .thumb:hover { outline: 2px solid var(--accent); }
+  .name { font-weight: 600; color: var(--text); text-decoration: none; word-break: break-word; }
+  .name:hover { text-decoration: underline; }
+  .meta { font-size: 13px; color: var(--muted); display: flex; gap: 10px; flex-wrap: wrap; margin-top: 3px; }
+  .meta a { color: var(--text); }
+  .feed span { word-break: break-word; }
+  .detail { font-size: 13px; color: var(--muted); margin-top: 3px; }
+  .detail.err { color: var(--bad); }
+  .right { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
+  .actions { display: flex; gap: 6px; }
+  .pill { font-size: 12px; font-weight: 700; padding: 3px 10px; border-radius: 999px; white-space: nowrap;
+          background: var(--neutral-bg); color: var(--muted); }
+  .pill.in_stock { background: var(--ok-bg); color: var(--ok); }
+  .pill.out_of_stock { background: var(--bad-bg); color: var(--bad); }
+  .pill.queue, .pill.blocked { background: var(--warn-bg); color: var(--warn); }
+  .pill.error { background: var(--bad-bg); color: var(--bad); }
+  .tag { font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 5px; background: var(--info-bg); color: var(--info); }
+  .empty { color: var(--muted); padding: 18px 0 6px; }
+
+  .cols { display: grid; grid-template-columns: 1.3fr 1fr; gap: 16px; }
+  .feed { list-style: none; margin: 0; padding: 0; max-height: 460px; overflow: auto; }
+  .feed li { display: grid; grid-template-columns: 64px 1fr; gap: 8px; padding: 7px 0; border-top: 1px solid var(--border); font-size: 14px; }
+  .feed li:first-child { border-top: 0; }
+  .feed time { color: var(--muted); font-size: 12px; padding-top: 2px; }
+  .feed .in_stock, .feed .alert { color: var(--ok); font-weight: 600; }
+  .feed .queue { color: var(--warn); font-weight: 600; }
+  .feed .error { color: var(--bad); }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
+  label:first-of-type { margin-top: 0; }
+  .settings input { width: 100%; }
+  .row3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .check { display: flex; align-items: center; gap: 8px; margin: 12px 0 0; color: var(--text); font-size: 14px; }
+  .check input { width: auto; }
+  .btns { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+  @media (max-width: 780px) {
+    .cols { grid-template-columns: 1fr; }
+    .item { grid-template-columns: 44px 1fr; }
+    .thumb { width: 44px; height: 44px; }
+    .right { grid-column: 1 / -1; flex-direction: row; justify-content: space-between; align-items: center; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1><span class="ball" aria-hidden="true"></span> Restock Monitor</h1>
+    <div class="chips" id="chips"></div>
+  </header>
+
+  <div class="banner update" id="updateBanner" hidden>
+    A new version (<span id="newVersion"></span>) is ready. <button class="primary small" id="updateBtn">Update now</button>
+  </div>
+
+  <div class="banner" id="setupBanner" hidden>
+    Alerts are off until you add a Discord webhook. <a href="#settings">Set it up below</a>.
+  </div>
+
+  <section class="panel">
+    <h2>Watch a product</h2>
+    <form class="add" id="addForm">
+      <input class="url" name="url" placeholder="Paste a Target or Pokémon Center product link…" required>
+      <input class="max" name="max_price" placeholder="Max price $" inputmode="decimal">
+      <button class="primary" type="submit">Add</button>
+    </form>
+    <div class="msg" id="addMsg"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Watchlist</h2>
+    <div class="items" id="items"></div>
+  </section>
+
+  <div class="cols">
+    <section class="panel">
+      <h2>Activity</h2>
+      <ul class="feed" id="feed"></ul>
+    </section>
+
+    <section class="panel settings" id="settings">
+      <h2>Settings</h2>
+      <form id="settingsForm">
+        <label for="discord_webhook">Discord webhook link</label>
+        <input id="discord_webhook" name="discord_webhook" placeholder="https://discord.com/api/webhooks/…">
+        <div class="hint">Discord server → Edit channel → Integrations → Webhooks → New → Copy URL.</div>
+        <label class="check"><input type="checkbox" id="ping_everyone"> Ping @everyone (makes your phone buzz)</label>
+
+        <label>Check every (seconds)</label>
+        <div class="row3">
+          <div><input name="interval_target" inputmode="numeric"><div class="hint">Target</div></div>
+          <div><input name="interval_pokemoncenter" inputmode="numeric"><div class="hint">Pokémon Center</div></div>
+          <div><input name="interval_other" inputmode="numeric"><div class="hint">Other stores</div></div>
+        </div>
+
+        <label>Target store (optional, adds in-store pickup)</label>
+        <div class="row2">
+          <div><input name="target_store_id" placeholder="Store ID" inputmode="numeric"></div>
+          <div><input name="target_zip" placeholder="ZIP code" inputmode="numeric"></div>
+        </div>
+        <div class="hint">Store ID is the number at the end of your store's page link on target.com.</div>
+
+        <div class="btns">
+          <button class="primary" type="submit">Save</button>
+          <button type="button" id="testBtn">Send test alert</button>
+        </div>
+        <div class="msg" id="settingsMsg"></div>
+      </form>
+    </section>
+  </div>
+  <footer>Restock Monitor <span id="version"></span></footer>
+</div>
+
+<script>
+const $ = (sel) => document.querySelector(sel);
+const STATUS_LABEL = { in_stock: "In stock", out_of_stock: "Sold out", unknown: "Checking…",
+  queue: "Queue live", blocked: "Blocked", error: "Error" };
+const STORE = { target: "Target", pokemoncenter: "Pokémon Center", walmart: "Walmart",
+  bestbuy: "Best Buy", gamestop: "GameStop", amazon: "Amazon", other: "Other" };
+let latest = null;
+let settingsLoaded = false;
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function ago(ts, now) {
+  if (!ts) return "never";
+  const s = Math.max(0, Math.round(now - ts));
+  if (s < 60) return s + "s ago";
+  if (s < 3600) return Math.round(s / 60) + "m ago";
+  if (s < 86400) return Math.round(s / 3600) + "h ago";
+  return Math.round(s / 86400) + "d ago";
+}
+function clock(ts) {
+  return new Date(ts * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+function displayName(i) {
+  if (i.name) return i.name;
+  const tcin = (i.url.match(/\/A-(\d+)/) || [])[1];
+  return tcin ? `Target item #${tcin}` : i.url;
+}
+function money(v) { return v == null ? "" : "$" + Number(v).toFixed(2); }
+
+async function api(path, method = "GET", body) {
+  const res = await fetch(path, {
+    method, headers: { "Content-Type": "application/json", "X-Dashboard": "1" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || data.message || res.statusText);
+  return data;
+}
+function flash(el, text, good) {
+  el.textContent = text;
+  el.className = "msg " + (good ? "good" : "err");
+  clearTimeout(el._t);
+  el._t = setTimeout(() => { el.textContent = ""; }, 6000);
+}
+
+function render() {
+  const { items, events, settings, now } = latest;
+  const active = items.filter((i) => i.enabled).length;
+  const inStock = items.filter((i) => i.enabled && i.status === "in_stock").length;
+  const hasHook = !!settings.discord_webhook;
+  $("#chips").innerHTML =
+    `<span class="chip">Watching ${active} item${active === 1 ? "" : "s"}</span>` +
+    (inStock ? `<span class="chip ok">${inStock} in stock</span>` : "") +
+    `<span class="chip ${hasHook ? "ok" : "bad"}">Discord ${hasHook ? "on" : "off"}</span>`;
+  $("#setupBanner").hidden = hasHook;
+  $("#updateBanner").hidden = !latest.update_available;
+  $("#newVersion").textContent = "v" + (latest.update_available || "");
+  $("#version").textContent = "v" + latest.version;
+
+  $("#items").innerHTML = items.length ? items.map((i) => {
+    const status = i.enabled ? i.status : "paused";
+    const label = i.enabled ? (STATUS_LABEL[i.status] || i.status) : "Paused";
+    const note = i.last_error || i.detail;
+    return `<div class="item ${i.enabled ? "" : "paused"}">
+      ${i.image ? `<img class="thumb" src="${esc(i.image)}" alt="" loading="lazy" data-pic="${i.id}" title="Click to change picture">`
+        : `<div class="thumb" data-pic="${i.id}" title="Click to add a picture">+ pic</div>`}
+      <div>
+        <a class="name" href="${esc(i.url)}" target="_blank" rel="noopener">${esc(displayName(i))}</a>
+        <div class="meta">
+          <span class="tag">${esc(STORE[i.retailer] || i.retailer)}</span>
+          ${i.price != null ? `<span>${money(i.price)}</span>` : ""}
+          <span>Max: <a href="#" data-edit="${i.id}">${i.max_price != null ? money(i.max_price) : "any"}</a></span>
+          <span>Checked ${ago(i.last_checked, now)}</span>
+          ${i.last_in_stock ? `<span>Last in stock ${ago(i.last_in_stock, now)}</span>` : ""}
+        </div>
+        ${note ? `<div class="detail ${i.last_error ? "err" : ""}">${esc(note)}</div>` : ""}
+      </div>
+      <div class="right">
+        <span class="pill ${esc(status)}">${esc(label)}</span>
+        <div class="actions">
+          <button class="small" data-act="check" data-id="${i.id}">Check now</button>
+          <button class="small" data-act="toggle" data-id="${i.id}">${i.enabled ? "Pause" : "Resume"}</button>
+          <button class="small" data-act="delete" data-id="${i.id}" aria-label="Remove">Remove</button>
+        </div>
+      </div>
+    </div>`;
+  }).join("") : `<div class="empty">Nothing watched yet. Paste a product link above to start.</div>`;
+
+  $("#feed").innerHTML = events.length ? events.map((e) =>
+    `<li><time>${clock(e.ts)}</time><span class="${esc(e.kind)}">${esc(e.message)}</span></li>`
+  ).join("") : `<li><span class="empty">Nothing yet.</span></li>`;
+
+  if (!settingsLoaded) fillSettings(settings);
+}
+
+function fillSettings(s) {
+  const form = $("#settingsForm");
+  for (const key of Object.keys(s)) if (form.elements[key]) form.elements[key].value = s[key];
+  $("#ping_everyone").checked = s.ping_everyone === "1";
+  settingsLoaded = true;
+}
+
+async function refresh() {
+  try { latest = await api("/api/state"); render(); }
+  catch (e) { $("#chips").innerHTML = `<span class="chip bad">Monitor not running - start it again</span>`; }
+}
+
+$("#addForm").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const f = ev.target;
+  try {
+    await api("/api/items", "POST", { url: f.url.value, max_price: f.max_price.value });
+    f.reset();
+    flash($("#addMsg"), "Added - checking it now…", true);
+    refresh();
+  } catch (e) { flash($("#addMsg"), e.message, false); }
+});
+
+$("#items").addEventListener("click", async (ev) => {
+  const pic = ev.target.closest("[data-pic]");
+  if (pic) {
+    const value = prompt("Paste a picture link for this item.\n(On the product page: right-click the product photo → Copy image address.)\nLeave blank to remove it.");
+    if (value !== null) {
+      try { await api(`/api/items/${pic.dataset.pic}/edit`, "POST", { image: value }); }
+      catch (e) { alert(e.message); }
+      refresh();
+    }
+    return;
+  }
+  const edit = ev.target.closest("[data-edit]");
+  if (edit) {
+    ev.preventDefault();
+    const value = prompt("Only alert me when the price is at or below (leave blank for any price):");
+    if (value !== null) { await api(`/api/items/${edit.dataset.edit}/edit`, "POST", { max_price: value }); refresh(); }
+    return;
+  }
+  const btn = ev.target.closest("button[data-act]");
+  if (!btn) return;
+  const { act, id } = btn.dataset;
+  if (act === "delete") {
+    if (!confirm("Stop watching this item?")) return;
+    await api(`/api/items/${id}`, "DELETE");
+  } else {
+    await api(`/api/items/${id}/${act}`, "POST");
+  }
+  refresh();
+});
+
+$("#settingsForm").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const data = Object.fromEntries(new FormData(ev.target));
+  data.ping_everyone = $("#ping_everyone").checked ? "1" : "0";
+  try {
+    await api("/api/settings", "POST", data);
+    settingsLoaded = false;
+    flash($("#settingsMsg"), "Saved.", true);
+    refresh();
+  } catch (e) { flash($("#settingsMsg"), e.message, false); }
+});
+
+$("#testBtn").addEventListener("click", async () => {
+  try {
+    $("#settingsForm").requestSubmit();
+    await new Promise((r) => setTimeout(r, 300));
+    const r = await api("/api/test-alert", "POST");
+    flash($("#settingsMsg"), r.message + " - check Discord!", true);
+  } catch (e) { flash($("#settingsMsg"), e.message, false); }
+});
+
+$("#updateBtn").addEventListener("click", async () => {
+  const btn = $("#updateBtn");
+  btn.disabled = true; btn.textContent = "Updating…";
+  try {
+    await api("/api/update", "POST");
+    btn.textContent = "Restarting…";
+    setTimeout(() => location.reload(), 5000);
+  } catch (e) { alert(e.message); btn.disabled = false; btn.textContent = "Update now"; }
+});
+
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>

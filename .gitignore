@@ -1,0 +1,3 @@
+monitor.db
+__pycache__/
+*.new
