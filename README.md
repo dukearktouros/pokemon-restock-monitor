@@ -75,6 +75,7 @@ Keep Chrome open (it can be minimized). The helper updates itself along with the
   (check the current price for each product): Elite Trainer Box about $50-60,
   Booster Bundle about $27-30, Pokémon Center ETB about $60. A $150 "ETB" is a reseller.
 
+## Tips
 - **Your computer must be on and awake.** Turn off sleep mode while you're monitoring
   (Windows: Settings → System → Power; Mac: System Settings → Battery/Energy → prevent sleep).
 - **Be logged in ahead of time** on Target and Pokémon Center with your address and card
