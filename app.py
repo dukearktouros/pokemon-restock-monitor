@@ -62,6 +62,10 @@ DEFAULT_SETTINGS = {
     "target_fast_gap": "3",
     "auto_checkout": "off",          # off / test / on
     "auto_checkout_daily_limit": "250",
+    "feed_enabled": "0",
+    "feed_bot_token": "",
+    "feed_channel_id": "",
+    "feed_pokemon_only": "1",
 }
 
 IN_STOCK = "in_stock"
@@ -75,7 +79,7 @@ CONFIRMING = "confirming"     # one reading said in stock; double-checking befor
 
 START_TIME = time.time()
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 UPDATE_BASE = "https://raw.githubusercontent.com/dukearktouros/pokemon-restock-monitor/main/"
 UPDATE_FILES = ["app.py", "dashboard.html", "README.md", "Start (Windows).bat", "Start (Mac).command",
                 "chrome-helper/manifest.json", "chrome-helper/background.js"]
@@ -819,7 +823,8 @@ def ext_checkout(body):
         log_event(item and item["id"], "checkout", "Place order clicked for %s - waiting for the confirmation page" % label)
         return
     if outcome == "test_ok":
-        log_event(item and item["id"], "checkout", "Test checkout for %s worked: total $%s, stopped before Place order"
+        log_event(item and item["id"], "checkout", "Test checkout for %s worked: total $%s, stopped before Place "
+                  "order. Remove it from your Target cart now so a real checkout starts from an empty cart."
                   % (label, "%.2f" % total if total is not None else "?"))
         return
     log_event(item and item["id"], "error", "Checkout stopped for %s: %s" % (label, message))
@@ -1051,6 +1056,7 @@ def state():
             "discoveries": query("SELECT * FROM discoveries WHERE status = 'new' ORDER BY found_at DESC LIMIT 60"),
             "orders": query("SELECT * FROM orders ORDER BY ts DESC LIMIT 30"),
             "chrome": {"connected": ext_connected(), "last_seen": _ext["last_seen"] or None},
+            "feed": {"status": _feed["status"]},
             "now": time.time(), "started": START_TIME,
             "version": VERSION, "update_available": _update["latest"]}
 
@@ -1139,6 +1145,138 @@ def relaunch(extra_args):
     """Start the freshly installed version in this same window."""
     args = [a for a in sys.argv[1:] if a not in extra_args] + extra_args
     sys.exit(subprocess.call([sys.executable, os.path.join(HERE, "app.py")] + args))
+
+
+# ---------------------------------------------------------------- discord feed
+#
+# Reads a channel in YOUR server that follows another server's alert channel (Discord's
+# "Follow" button copies their alerts into your channel). A bot you create in your own server
+# reads it; every product link is treated like a first "in stock" reading and confirmed by a
+# real check before anything alerts or gets bought.
+
+FEED_CATEGORY = "Discord feed"
+_feed = {"status": "off", "last_id": None, "seen": {}, "empty": 0}
+
+
+class FeedWait(Exception):
+    def __init__(self, seconds):
+        Exception.__init__(self, "rate limited")
+        self.seconds = seconds
+
+
+def discord_api(token, path):
+    request = urllib.request.Request("https://discord.com/api/v10" + path, headers={
+        "Authorization": "Bot " + token, "User-Agent": "RestockMonitor (local, %s)" % VERSION})
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return json.loads(response.read())
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            try:
+                raise FeedWait(float(json.loads(e.read()).get("retry_after", 5)))
+            except ValueError:
+                raise FeedWait(5)
+        reasons = {401: "the bot token is wrong",
+                   403: "the bot can't read that channel - check it was invited with Read Message History",
+                   404: "that channel ID wasn't found"}
+        raise RuntimeError(reasons.get(e.code, "Discord answered HTTP %d" % e.code))
+
+
+def feed_links(message):
+    """Pull Target / Pokemon Center product links out of a message, its embeds and buttons."""
+    texts = [message.get("content") or ""]
+    for embed in message.get("embeds") or []:
+        texts += [embed.get("title") or "", embed.get("url") or "", embed.get("description") or ""]
+        texts += ["%s %s" % (f.get("name", ""), f.get("value", "")) for f in embed.get("fields") or []]
+    for row in message.get("components") or []:
+        texts += [c.get("url") or "" for c in row.get("components") or []]
+    blob = "\n".join(texts)
+    urls = []
+    for url in re.findall(r"https?://[^\s)>\]\"'|]+", blob):
+        if listing_key(url):
+            urls.append(url.split("?")[0])
+    for tcin in re.findall(r"\bTCIN\W{0,4}(\d{6,10})\b", blob, re.I):
+        urls.append("https://www.target.com/p/-/A-%s" % tcin)
+    return blob, urls
+
+
+def feed_category_id():
+    rows = query("SELECT id FROM categories WHERE name = ?", (FEED_CATEGORY,))
+    if rows:
+        return rows[0]["id"]
+    return execute("INSERT INTO categories(name, keywords, max_price) VALUES (?, '', 60)", (FEED_CATEGORY,))
+
+
+def handle_feed_message(message, settings):
+    blob, urls = feed_links(message)
+    if not blob.strip():
+        _feed["empty"] += 1
+    if not urls or (settings["feed_pokemon_only"] == "1" and "pok" not in blob.lower()):
+        return
+    now = time.time()
+    for url in urls:
+        key = listing_key(url)
+        if _feed["seen"].get(key, 0) > now - 120:
+            continue
+        _feed["seen"][key] = now
+        item = next((i for i in query("SELECT * FROM items") if listing_key(i["url"]) == key), None)
+        if item is None:
+            item = get_item(add_item({"url": url, "category_id": feed_category_id()}))
+        if not item["enabled"]:
+            continue  # paused (for example, already bought)
+        if item["stock"] == IN_STOCK:
+            continue
+        _pending_confirm[item["id"]] = "feed"
+        execute("UPDATE items SET status = ? WHERE id = ?", (CONFIRMING, item["id"]))
+        _next_due[item["id"]] = 0
+        log_event(item["id"], "feed", "Discord feed says %s is live - checking it now" % (item["name"] or url))
+
+
+def poll_feed(token, channel, settings):
+    if _feed["last_id"] is None:  # start from the newest message; don't replay old alerts
+        latest = discord_api(token, "/channels/%s/messages?limit=1" % channel)
+        _feed["last_id"] = latest[0]["id"] if latest else "0"
+    else:
+        messages = discord_api(token, "/channels/%s/messages?after=%s&limit=50" % (channel, _feed["last_id"]))
+        for message in sorted(messages, key=lambda m: int(m["id"])):
+            _feed["last_id"] = message["id"]
+            handle_feed_message(message, settings)
+    _feed["status"] = ("connected, but messages arrive empty - turn on Message Content Intent for your bot"
+                       if _feed["empty"] >= 3 else "connected")
+
+
+def feed_poller():
+    while True:
+        settings = get_settings()
+        token, channel = settings["feed_bot_token"].strip(), settings["feed_channel_id"].strip()
+        if settings["feed_enabled"] != "1" or not token or not channel:
+            _feed.update(status="off", last_id=None, empty=0)
+            time.sleep(3)
+            continue
+        delay = 2
+        try:
+            poll_feed(token, channel, settings)
+        except FeedWait as wait:
+            delay = wait.seconds + 0.5
+        except Exception as e:
+            _feed["status"] = "error: %s" % e
+            delay = 15
+        time.sleep(delay)
+
+
+def start_test_checkout(item):
+    """Run a test checkout right now (stops before Place order), so you can try it before a drop."""
+    if item["retailer"] != "target":
+        raise ValueError("Test checkout works on Target items")
+    if not ext_connected():
+        raise ValueError("The Chrome helper isn't connected - open Chrome")
+    max_price = effective_max(item) if effective_max(item) is not None else item["price"]
+    if max_price is None:
+        raise ValueError("Set a max price for this item first")
+    max_total = round(max_price * TAX_SHIPPING_ALLOWANCE[0] + TAX_SHIPPING_ALLOWANCE[1], 2)
+    _ext["open"].append({"item_id": item["id"], "url": item["url"], "checkout_url": CHECKOUT_URLS["target"],
+                         "auto_checkout": "test", "max_total": max_total})
+    log_event(item["id"], "checkout", "Test checkout started for %s - watch Chrome" % (item["name"] or item["url"]))
 
 
 def update_checker():
@@ -1276,13 +1414,15 @@ class Handler(BaseHTTPRequestHandler):
                                            "This is what a restock alert will look like.", 0x3B82F6)
                 self._json({"ok": ok, "message": message}, 200 if ok else 400)
                 return
-            match = re.match(r"^/api/items/(\d+)/(check|toggle|edit)$", path)
+            match = re.match(r"^/api/items/(\d+)/(check|toggle|edit|test-checkout)$", path)
             if match:
                 item_id, action = int(match.group(1)), match.group(2)
                 if not get_item(item_id):
                     self._json({"error": "Item not found"}, 404)
                     return
-                if action == "check":
+                if action == "test-checkout":
+                    start_test_checkout(get_item(item_id))
+                elif action == "check":
                     _failures[item_id] = 0
                     _next_due[item_id] = 0
                 elif action == "toggle":
@@ -1351,6 +1491,7 @@ def main():
     threading.Thread(target=scheduler, daemon=True).start()
     threading.Thread(target=fill_missing_details, daemon=True).start()
     threading.Thread(target=update_checker, daemon=True).start()
+    threading.Thread(target=feed_poller, daemon=True).start()
     print("=" * 56)
     print("  Pokemon Restock Monitor v%s is running" % VERSION)
     print("  Dashboard: %s" % url)

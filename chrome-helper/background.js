@@ -90,7 +90,13 @@ async function loop() {
         }
       }
       setBadge(Date.now() < fastPausedUntil ? "slow" : "", "#6b7280");
-      if (!didWork) return; // nothing due; the alarm wakes us again
+      if (!didWork) {
+        // Nothing due: ask again shortly so a Discord-feed alert is picked up within seconds.
+        // (Touching extension storage keeps Chrome from putting the helper to sleep.)
+        await chrome.storage.session.get("watcherTabId");
+        await sleep(1500);
+        continue;
+      }
       await sleep(fast.items.length ? fast.gap * 1000 : 1500 + Math.random() * 1500);
     }
   } catch (e) {

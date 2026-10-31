@@ -103,6 +103,31 @@ Safety rules, always on:
 
 Before a drop: be signed in to Target in this Chrome with your address and card saved.
 
+**Try it before a drop:** every Target item has a **Test checkout** button. It adds the item
+to your cart, goes through checkout and stops before Place order, then reports the total in
+Activity. Afterwards, **remove the item from your Target cart**, so a real checkout starts empty.
+
+## Discord feed: use alerts from a server you follow
+
+If another server's alert channel has a **Follow** button, its alerts can feed your bot.
+Each alert is double-checked in Chrome before you're pinged or anything gets bought.
+
+1. **Follow their channel:** in their server, open the alert channel, click **Follow**, and
+   pick your server and a channel, for example a new `#restock-feed`.
+2. **Create your own bot:** go to <https://discord.com/developers/applications>, then
+   **New Application** → **Bot** → **Reset Token** → copy the token. On the same page,
+   turn on **Message Content Intent**.
+3. **Invite it to your server:** **OAuth2** → **URL Generator** → tick **bot**, then the permissions
+   **View Channels** and **Read Message History**. Open the link it makes and pick your server.
+4. **Copy the channel ID:** in Discord, go to **Settings → Advanced → Developer Mode** (on), then right-click
+   `#restock-feed` → **Copy Channel ID**.
+5. **In the dashboard Settings:** tick **Read alerts from my followed channel**, paste the
+   channel ID and the bot token, and click **Save**. The chip at the top says **Feed connected**.
+
+Items from the feed land in the **Discord feed** category. Its **Max $** (60 to start)
+decides what automatic checkout may buy, so adjust it. The bot token is like a password:
+it stays on your computer, and you shouldn't share it.
+
 ## Order confirmations
 
 When an order is placed, by you or by automatic checkout, and the store shows its
