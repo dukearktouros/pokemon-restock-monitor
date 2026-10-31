@@ -91,6 +91,9 @@ In Settings, **Automatic checkout on Target** has three modes:
   notes the total in Activity. **Try this first on a real item** to make sure it works with your account.
 - **On:** the bot presses Place order itself.
 
+**Nothing is bought unless you tick Auto-buy**, either on an item (checkbox next to it in
+the watchlist) or on a whole category (the **Buy** box in Categories). Everything else just pings you.
+
 Safety rules, always on:
 - Only confirmed restocks (two checks), only sold by Target, only on Target.
 - Only items with a **max price** (on the item or its category).
@@ -124,7 +127,13 @@ Each alert is double-checked in Chrome before you're pinged or anything gets bou
 5. **In the dashboard Settings:** tick **Read alerts from my followed channel**, paste the
    channel ID and the bot token, and click **Save**. The chip at the top says **Feed connected**.
 
-Items from the feed land in the **Discord feed** category. Its **Max $** (60 to start)
+**Only your sets:** with "Only sets in my Categories" ticked (the default), the feed only
+acts on alerts whose name or link matches one of your categories, for example "Ascended Heroes".
+Every other set is ignored: no watchlist entry, no ping, no purchase. Matching alerts go straight
+into that category. To catch shorter names like "Prismatic ETB", add `prismatic` to that category's
+search words.
+
+With that box unticked, other Pokémon items from the feed land in the **Discord feed** category. Its **Max $** (60 to start)
 decides what automatic checkout may buy, so adjust it. The bot token is like a password:
 it stays on your computer, and you shouldn't share it.
 

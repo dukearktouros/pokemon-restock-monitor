@@ -66,6 +66,7 @@ DEFAULT_SETTINGS = {
     "feed_bot_token": "",
     "feed_channel_id": "",
     "feed_pokemon_only": "1",
+    "feed_categories_only": "1",
 }
 
 IN_STOCK = "in_stock"
@@ -79,7 +80,7 @@ CONFIRMING = "confirming"     # one reading said in stock; double-checking befor
 
 START_TIME = time.time()
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 UPDATE_BASE = "https://raw.githubusercontent.com/dukearktouros/pokemon-restock-monitor/main/"
 UPDATE_FILES = ["app.py", "dashboard.html", "README.md", "Start (Windows).bat", "Start (Mac).command",
                 "chrome-helper/manifest.json", "chrome-helper/background.js"]
@@ -153,7 +154,9 @@ SCHEMA.append("""CREATE TABLE IF NOT EXISTS orders (
         url TEXT
     )""")
 
-MIGRATIONS = [("items", "category_id", "INTEGER"), ("items", "seller", "TEXT"), ("orders", "item_id", "INTEGER")]
+MIGRATIONS = [("items", "category_id", "INTEGER"), ("items", "seller", "TEXT"), ("orders", "item_id", "INTEGER"),
+              ("items", "auto_buy", "INTEGER NOT NULL DEFAULT 0"),
+              ("categories", "auto_buy", "INTEGER NOT NULL DEFAULT 0")]
 
 STARTER_CATEGORIES = [
     ("Ascended Heroes", "pokemon ascended heroes"),
@@ -778,6 +781,10 @@ def auto_checkout_plan(item, settings):
         return None, "auto checkout is off"
     if item["retailer"] != "target":
         return None, "auto checkout only works on Target"
+    category = query("SELECT auto_buy FROM categories WHERE id = ?", (item["category_id"],)) \
+        if item.get("category_id") else []
+    if not item.get("auto_buy") and not (category and category[0]["auto_buy"]):
+        return None, "Auto-buy isn't ticked for this item or its category"
     max_price = effective_max(item)
     if max_price is None:
         return None, "set a max price for this item or its category to let the bot buy it"
@@ -1020,10 +1027,12 @@ def save_category(body, category_id=None):
     keywords = ", ".join(k.strip() for k in str(body.get("keywords") or "").split(",") if k.strip())[:300]
     raw = str(body.get("max_price") or "").strip()
     max_price = parse_price(raw) if raw else None
+    auto_buy = 1 if str(body.get("auto_buy")) in ("1", "true", "True") else 0
     if category_id is None:
-        return execute("INSERT INTO categories(name, keywords, max_price) VALUES (?, ?, ?)", (name, keywords, max_price))
-    execute("UPDATE categories SET name = ?, keywords = ?, max_price = ? WHERE id = ?",
-            (name, keywords, max_price, category_id))
+        return execute("INSERT INTO categories(name, keywords, max_price, auto_buy) VALUES (?, ?, ?, ?)",
+                       (name, keywords, max_price, auto_buy))
+    execute("UPDATE categories SET name = ?, keywords = ?, max_price = ?, auto_buy = ? WHERE id = ?",
+            (name, keywords, max_price, auto_buy, category_id))
     return category_id
 
 
@@ -1200,6 +1209,22 @@ def feed_links(message):
     return blob, urls
 
 
+def _plain(text):
+    text = text.lower().replace("\u00e9", "e")
+    return " " + re.sub(r"[^a-z0-9]+", " ", text).strip() + " "
+
+
+def match_category(text):
+    """The first of your categories whose name or search words appear in the text."""
+    plain = _plain(text)
+    for category in query("SELECT * FROM categories WHERE name != ? ORDER BY id", (FEED_CATEGORY,)):
+        for phrase in [category["name"]] + (category["keywords"] or "").split(","):
+            words = _plain(phrase).replace(" pokemon ", " ").replace(" tcg ", " ").strip()
+            if len(words) >= 4 and " %s " % words in plain:
+                return category
+    return None
+
+
 def feed_category_id():
     rows = query("SELECT id FROM categories WHERE name = ?", (FEED_CATEGORY,))
     if rows:
@@ -1213,6 +1238,9 @@ def handle_feed_message(message, settings):
         _feed["empty"] += 1
     if not urls or (settings["feed_pokemon_only"] == "1" and "pok" not in blob.lower()):
         return
+    category = match_category(blob)
+    if category is None and settings["feed_categories_only"] == "1":
+        return  # a set you don't collect
     now = time.time()
     for url in urls:
         key = listing_key(url)
@@ -1221,7 +1249,8 @@ def handle_feed_message(message, settings):
         _feed["seen"][key] = now
         item = next((i for i in query("SELECT * FROM items") if listing_key(i["url"]) == key), None)
         if item is None:
-            item = get_item(add_item({"url": url, "category_id": feed_category_id()}))
+            item = get_item(add_item({"url": url,
+                                      "category_id": category["id"] if category else feed_category_id()}))
         if not item["enabled"]:
             continue  # paused (for example, already bought)
         if item["stock"] == IN_STOCK:
@@ -1433,6 +1462,9 @@ class Handler(BaseHTTPRequestHandler):
                         raw = str(body.get("max_price") or "").strip()
                         execute("UPDATE items SET max_price = ? WHERE id = ?",
                                 (parse_price(raw) if raw else None, item_id))
+                    if "auto_buy" in body:
+                        execute("UPDATE items SET auto_buy = ? WHERE id = ?",
+                                (1 if str(body.get("auto_buy")) in ("1", "true", "True") else 0, item_id))
                     if "category_id" in body:
                         execute("UPDATE items SET category_id = ? WHERE id = ?",
                                 (_category_id(body.get("category_id")), item_id))

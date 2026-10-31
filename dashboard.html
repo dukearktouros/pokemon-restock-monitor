@@ -101,7 +101,9 @@
   .head h2 { margin: 0; }
   .item.flagged { opacity: .6; }
   .note { font-size: 13px; color: var(--muted); background: var(--panel-2); border-radius: 8px; padding: 10px 12px; }
-  .cat-row { display: grid; grid-template-columns: 1fr 1.6fr 92px auto; gap: 6px; align-items: center; padding: 6px 0; }
+  .cat-row { display: grid; grid-template-columns: 1fr 1.6fr 80px 64px 96px; gap: 6px; align-items: center; padding: 6px 0; }
+  .cat-row .ab, .meta .ab { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text); margin: 0; }
+  .cat-row .ab input, .meta .ab input { width: auto; margin: 0; }
   .cat-row input { width: 100%; font-size: 14px; padding: 7px 9px; }
   .cat-head { font-size: 12px; color: var(--muted); padding-bottom: 0; }
   .feed .discover { color: var(--info); font-weight: 600; }
@@ -185,12 +187,13 @@
     <div>
       <section class="panel" id="categoriesPanel">
         <h2>Categories</h2>
-        <div class="cat-row cat-head"><span>Name</span><span>Search words (comma separated)</span><span>Max $</span><span></span></div>
+        <div class="cat-row cat-head"><span>Name</span><span>Search words (comma separated)</span><span>Max $</span><span>Auto-buy</span><span></span></div>
         <div id="categories"></div>
         <form class="cat-row" id="newCategory">
           <input name="name" placeholder="New category">
           <input name="keywords" placeholder="e.g. pokemon surging sparks">
           <input name="max_price" placeholder="Max $" inputmode="decimal">
+          <label class="ab"><input type="checkbox" name="auto_buy"> Buy</label>
           <button class="small primary" type="submit">Add</button>
         </form>
         <div class="hint">Discover searches Target and Pokémon Center for these words. Max $ is the most you'd pay
@@ -227,8 +230,9 @@
           <option value="test">Test - do everything except Place order</option>
           <option value="on">On - the bot places the order</option>
         </select>
-        <div class="hint">Buys only confirmed restocks sold by Target, only items with a max price (item or category),
-          one order per item, and stops if the checkout total is over max price + tax/shipping.</div>
+        <div class="hint">Only buys items where <strong>Auto-buy</strong> is ticked (on the item, or its category in Categories).
+          Also: confirmed restocks sold by Target only, a max price is required, one order per item, and it stops if
+          the checkout total is over max price + tax/shipping.</div>
         <label for="auto_checkout_daily_limit">Daily spending limit for automatic orders ($)</label>
         <input id="auto_checkout_daily_limit" name="auto_checkout_daily_limit" inputmode="decimal">
 
@@ -239,6 +243,7 @@
         <label for="feed_bot_token">Bot token</label>
         <input id="feed_bot_token" name="feed_bot_token" type="password" autocomplete="off" placeholder="From the Discord Developer Portal">
         <label class="check"><input type="checkbox" name="feed_pokemon_only"> Only Pokémon alerts</label>
+        <label class="check"><input type="checkbox" name="feed_categories_only"> Only sets in my Categories (ignore every other set)</label>
         <div class="hint">Setup steps are in the README. Each alert gets checked in Chrome before anything pings or buys.
           New items land in the "Discord feed" category, whose Max $ applies to them.</div>
         <label for="discover_minutes">Discover searches every (minutes, 0 = off)</label>
@@ -359,6 +364,7 @@ function render() {
         <div class="meta">
           <span class="tag">${esc(STORE[i.retailer] || i.retailer)}</span>
           ${cats.length ? `<select data-cat="${i.id}" aria-label="Category">${catOptions(i.category_id)}</select>` : ""}
+          ${i.retailer === "target" ? `<label class="ab" title="Let automatic checkout buy this item"><input type="checkbox" data-autobuy="${i.id}" ${i.auto_buy ? "checked" : ""}> Auto-buy</label>` : ""}
           ${i.price != null ? `<span>${money(i.price)}</span>` : ""}
           <span>Max: <a href="#" data-edit="${i.id}">${i.max_price != null ? money(i.max_price)
             : (cats.find((c) => c.id === i.category_id) || {}).max_price != null
@@ -418,6 +424,7 @@ function render() {
         <input name="name" value="${esc(c.name)}" aria-label="Name">
         <input name="keywords" value="${esc(c.keywords || "")}" aria-label="Search words">
         <input name="max_price" value="${c.max_price != null ? Number(c.max_price).toFixed(2) : ""}" placeholder="any" aria-label="Max price" inputmode="decimal">
+        <label class="ab"><input type="checkbox" name="auto_buy" ${c.auto_buy ? "checked" : ""}> Buy</label>
         <span class="actions"><button class="small" type="submit">Save</button><button class="small" type="button" data-delcat="${c.id}">✕</button></span>
       </form>`).join("");
   }
@@ -528,6 +535,13 @@ $("#tabs").addEventListener("click", (ev) => {
 });
 
 $("#items").addEventListener("change", async (ev) => {
+  const box = ev.target.closest("[data-autobuy]");
+  if (box) {
+    await api(`/api/items/${box.dataset.autobuy}/edit`, "POST", { auto_buy: box.checked ? "1" : "0" });
+    box.blur();
+    refresh();
+    return;
+  }
   const sel = ev.target.closest("[data-cat]");
   if (!sel) return;
   await api(`/api/items/${sel.dataset.cat}/edit`, "POST", { category_id: sel.value });
@@ -552,7 +566,7 @@ $("#categoriesPanel").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const f = ev.target;
   const el = f.elements;
-  const data = { name: el.name.value, keywords: el.keywords.value, max_price: el.max_price.value };
+  const data = { name: el.name.value, keywords: el.keywords.value, max_price: el.max_price.value, auto_buy: el.auto_buy.checked ? "1" : "0" };
   try {
     if (f.id === "newCategory") { await api("/api/categories", "POST", data); f.reset(); }
     else await api(`/api/categories/${f.dataset.catform}`, "POST", data);
