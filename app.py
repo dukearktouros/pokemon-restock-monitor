@@ -60,6 +60,8 @@ DEFAULT_SETTINGS = {
     "discord_extras": "0",
     "target_fast": "1",
     "target_fast_gap": "3",
+    "auto_checkout": "off",          # off / test / on
+    "auto_checkout_daily_limit": "250",
 }
 
 IN_STOCK = "in_stock"
@@ -73,7 +75,7 @@ CONFIRMING = "confirming"     # one reading said in stock; double-checking befor
 
 START_TIME = time.time()
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 UPDATE_BASE = "https://raw.githubusercontent.com/dukearktouros/pokemon-restock-monitor/main/"
 UPDATE_FILES = ["app.py", "dashboard.html", "README.md", "Start (Windows).bat", "Start (Mac).command",
                 "chrome-helper/manifest.json", "chrome-helper/background.js"]
@@ -132,6 +134,11 @@ SCHEMA = [
     )""",
 ]
 
+SCHEMA.append("""CREATE TABLE IF NOT EXISTS checkouts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts REAL NOT NULL,
+        item_id INTEGER
+    )""")
 SCHEMA.append("""CREATE TABLE IF NOT EXISTS orders (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         ts REAL NOT NULL,
@@ -142,7 +149,7 @@ SCHEMA.append("""CREATE TABLE IF NOT EXISTS orders (
         url TEXT
     )""")
 
-MIGRATIONS = [("items", "category_id", "INTEGER"), ("items", "seller", "TEXT")]
+MIGRATIONS = [("items", "category_id", "INTEGER"), ("items", "seller", "TEXT"), ("orders", "item_id", "INTEGER")]
 
 STARTER_CATEGORIES = [
     ("Ascended Heroes", "pokemon ascended heroes"),
@@ -752,10 +759,73 @@ def helper_version():
         return None
 
 
+TAX_SHIPPING_ALLOWANCE = (1.12, 10.0)   # checkout total may be up to max price x 1.12 + $10
+
+
+def spent_today():
+    midnight = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    return query("SELECT COALESCE(SUM(total), 0) AS spent FROM orders WHERE ts >= ?", (midnight,))[0]["spent"]
+
+
+def auto_checkout_plan(item, settings):
+    """Return (max checkout total, None) if the bot may buy this item by itself, else (None, reason)."""
+    mode = settings["auto_checkout"]
+    if mode not in ("test", "on"):
+        return None, "auto checkout is off"
+    if item["retailer"] != "target":
+        return None, "auto checkout only works on Target"
+    max_price = effective_max(item)
+    if max_price is None:
+        return None, "set a max price for this item or its category to let the bot buy it"
+    if query("SELECT 1 FROM orders WHERE item_id = ?", (item["id"],)):
+        return None, "already bought once"
+    if query("SELECT 1 FROM checkouts WHERE item_id = ? AND ts > ?", (item["id"], time.time() - 600)):
+        return None, "a checkout for this item was already tried in the last 10 minutes"
+    max_total = round(max_price * TAX_SHIPPING_ALLOWANCE[0] + TAX_SHIPPING_ALLOWANCE[1], 2)
+    try:
+        limit = float(settings["auto_checkout_daily_limit"])
+    except ValueError:
+        limit = 0
+    if mode == "on" and spent_today() + max_total > limit:
+        return None, "it would go over your daily limit of $%.2f" % limit
+    return max_total, None
+
+
 def open_in_chrome(item):
-    """Ask the Chrome helper to open an item that just came in stock."""
-    if ext_connected():
-        _ext["open"].append({"url": item["url"], "checkout_url": CHECKOUT_URLS.get(item["retailer"])})
+    """Ask the Chrome helper to open an item that just came in stock (and buy it, if allowed)."""
+    if not ext_connected():
+        return
+    settings = get_settings()
+    job = {"item_id": item["id"], "url": item["url"], "checkout_url": CHECKOUT_URLS.get(item["retailer"])}
+    max_total, reason = auto_checkout_plan(item, settings)
+    if max_total is not None:
+        job.update(auto_checkout=settings["auto_checkout"], max_total=max_total)
+        execute("INSERT INTO checkouts(ts, item_id) VALUES (?, ?)", (time.time(), item["id"]))
+        log_event(item["id"], "checkout", "%s checkout started for %s (total limit $%.2f)"
+                  % ("Test" if settings["auto_checkout"] == "test" else "Auto", item["name"] or item["url"], max_total))
+    elif settings["auto_checkout"] != "off":
+        log_event(item["id"], "skipped", "Not buying automatically: %s" % reason)
+    _ext["open"].append(job)
+
+
+def ext_checkout(body):
+    """The helper finished (or gave up on) an automatic checkout."""
+    item = get_item(int(body.get("item_id") or 0))
+    label = (item["name"] or item["url"]) if item else "an item"
+    outcome = str(body.get("outcome") or "")
+    message = str(body.get("message") or "")[:300]
+    total = parse_price(body.get("total"))
+    if outcome == "placed":
+        log_event(item and item["id"], "checkout", "Place order clicked for %s - waiting for the confirmation page" % label)
+        return
+    if outcome == "test_ok":
+        log_event(item and item["id"], "checkout", "Test checkout for %s worked: total $%s, stopped before Place order"
+                  % (label, "%.2f" % total if total is not None else "?"))
+        return
+    log_event(item and item["id"], "error", "Checkout stopped for %s: %s" % (label, message))
+    send_discord(get_settings(), {"url": body.get("url") or (item and item["url"]), "retailer": "target",
+                                  "price": total, "image": item and item["image"]},
+                 "CHECKOUT NEEDS YOU: %s" % label, message + "\nThe checkout page is open in Chrome.", 0xEF4444)
 
 
 def due_searches(settings, now, limit):
@@ -914,10 +984,16 @@ def ext_order(body):
     text = str(body.get("text") or "").lower()
     bought = [i for i in query("SELECT * FROM items")
               if i["name"] and i["name"].lower()[:30] in text]
+    by_bot = get_item(int(body.get("item_id") or 0))
+    if by_bot and all(i["id"] != by_bot["id"] for i in bought):
+        bought.insert(0, by_bot)
     names = ", ".join(i["name"] for i in bought)[:500] or None
     total = parse_price(body.get("total"))
-    execute("INSERT INTO orders(ts, retailer, order_number, total, items, url) VALUES (?, ?, ?, ?, ?, ?)",
-            (time.time(), retailer, number, total, names, str(body.get("url") or "")[:300]))
+    execute("INSERT INTO orders(ts, retailer, order_number, total, items, url, item_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (time.time(), retailer, number, total, names, str(body.get("url") or "")[:300],
+             bought[0]["id"] if bought else None))
+    for i in bought:  # bought it - stop watching so it's never bought twice
+        execute("UPDATE items SET enabled = 0 WHERE id = ?", (i["id"],))
     label = RETAILER_NAMES.get(retailer, "Store")
     log_event(bought[0]["id"] if bought else None, "order",
               "ORDER PLACED at %s%s" % (label, " - order #%s" % number if number else ""))
@@ -1137,6 +1213,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/ext/report":
                 ext_report(body)
+                self._json({"ok": True})
+                return
+            if path == "/api/ext/checkout":
+                ext_checkout(body)
                 self._json({"ok": True})
                 return
             if path == "/api/ext/order":

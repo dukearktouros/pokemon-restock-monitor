@@ -82,6 +82,8 @@
   .pill.marketplace { background: var(--warn-bg); color: var(--warn); }
   .pill.confirming { background: var(--info-bg); color: var(--info); }
   .feed .order { color: var(--ok); font-weight: 700; }
+  .feed .checkout { color: var(--info); font-weight: 600; }
+  .settings select { width: 100%; }
   .orders { list-style: none; margin: 0; padding: 0; }
   .orders li { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; padding: 8px 0;
                border-top: 1px solid var(--border); font-size: 14px; }
@@ -218,6 +220,16 @@
         <input id="target_fast_gap" name="target_fast_gap" inputmode="decimal">
         <label class="check"><input type="checkbox" name="pc_via_chrome"> Check Pokémon Center items in Chrome</label>
         <label class="check"><input type="checkbox" name="auto_cart"> When in stock: add to cart and open checkout (you press Place order)</label>
+        <label for="auto_checkout">Automatic checkout on Target</label>
+        <select id="auto_checkout" name="auto_checkout">
+          <option value="off">Off - I press Place order</option>
+          <option value="test">Test - do everything except Place order</option>
+          <option value="on">On - the bot places the order</option>
+        </select>
+        <div class="hint">Buys only confirmed restocks sold by Target, only items with a max price (item or category),
+          one order per item, and stops if the checkout total is over max price + tax/shipping.</div>
+        <label for="auto_checkout_daily_limit">Daily spending limit for automatic orders ($)</label>
+        <input id="auto_checkout_daily_limit" name="auto_checkout_daily_limit" inputmode="decimal">
         <label for="discover_minutes">Discover searches every (minutes, 0 = off)</label>
         <input id="discover_minutes" name="discover_minutes" inputmode="numeric">
 

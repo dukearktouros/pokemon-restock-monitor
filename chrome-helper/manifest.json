@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Restock Monitor Helper",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Checks your watched Target and Pokémon Center pages in your own browser and reports back to your Restock Monitor.",
   "permissions": ["alarms", "tabs", "scripting", "storage"],
   "host_permissions": [

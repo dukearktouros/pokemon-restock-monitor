@@ -138,17 +138,34 @@ async function runInTab(name, url, func, args, navigate) {
   }
 }
 
+const checkoutTabs = new Map(); // tab id -> watched item id, for orders the bot placed
+
 async function openForCheckout(job, autoCart) {
-  const tab = await chrome.tabs.create({ url: job.url, active: true });
+  const tab = await chrome.tabs.create({ url: "about:blank", active: true });
   chrome.windows.update(tab.windowId, { focused: true });
-  if (!autoCart || !job.checkout_url) return;
+  await sleep(300);
+  await chrome.tabs.update(tab.id, { url: job.url });
+  const auto = job.auto_checkout === "on" || job.auto_checkout === "test";
+  if ((!autoCart && !auto) || !job.checkout_url) return;
   await waitForLoad(tab.id);
+  const report = (outcome, message, extra = {}) =>
+    api("/api/ext/checkout", { item_id: job.item_id, url: job.url, outcome, message, ...extra }).catch(() => {});
   try {
     const [res] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: addToCart });
-    // Go to checkout and stop there. You review it and press "Place order" yourself.
-    if (res && res.result && res.result.added) await chrome.tabs.update(tab.id, { url: job.checkout_url });
+    if (!(res && res.result && res.result.added)) {
+      if (auto) await report("failed", "Couldn't find an Add to cart button for this item");
+      return;
+    }
+    await chrome.tabs.update(tab.id, { url: job.checkout_url });
+    if (!auto) return; // stop at checkout; you press "Place order"
+    await waitForLoad(tab.id);
+    const [step] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: placeOrder,
+      args: [job.max_total, job.auto_checkout === "test"] });
+    const result = (step && step.result) || { outcome: "failed", message: "The checkout page didn't respond" };
+    if (result.outcome === "placed") checkoutTabs.set(tab.id, job.item_id);
+    await report(result.outcome, result.message, { total: result.total });
   } catch (e) {
-    console.warn("Restock helper: add to cart failed", e);
+    if (auto) await report("failed", "Checkout error: " + e.message);
   }
 }
 
@@ -164,7 +181,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, info, tab) => {
     const key = order.order_number || tab.url;
     if (reportedOrders.has(key)) return;
     reportedOrders.add(key);
-    await api("/api/ext/order", { url: tab.url, ...order });
+    await api("/api/ext/order", { url: tab.url, item_id: checkoutTabs.get(tabId), ...order });
   } catch (e) {
     console.warn("Restock helper: couldn't read order page", e);
   }
@@ -359,6 +376,43 @@ async function addToCart() {
     await sleep(400);
   }
   return { added: false };
+}
+
+// Runs on Target's checkout page. Presses "Place order" only when everything checks out;
+// otherwise it stops and says why, leaving the page open for you.
+async function placeOrder(maxTotal, testOnly) {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const text = () => (document.body && document.body.innerText) || "";
+  const visible = (el) => el && el.offsetParent !== null;
+  const placeButton = () => [...document.querySelectorAll("button")].find((b) =>
+    /^place (your )?order$/i.test((b.innerText || "").trim()) && !b.disabled && b.getAttribute("aria-disabled") !== "true");
+  const deadline = Date.now() + 25000;
+  while (Date.now() < deadline && !placeButton()) {
+    if (/\/login|signin/i.test(location.href) || document.querySelector("input[type='password']")) {
+      return { outcome: "failed", message: "Target wants you to sign in. Sign in to Target in this Chrome so the bot can check out." };
+    }
+    if (document.querySelector("#px-captcha") || /press\s*(&|and)\s*hold|verify you are (a )?human/i.test(text().slice(0, 3000))) {
+      return { outcome: "failed", message: "Target is asking for a human check on the checkout page." };
+    }
+    await sleep(500);
+  }
+  await sleep(1200); // let totals settle
+  const button = placeButton();
+  if (!button) return { outcome: "failed", message: "Couldn't find the Place order button (maybe a payment or address step needs you)." };
+
+  const cvv = [...document.querySelectorAll("input")].find((i) => visible(i) && !i.value &&
+    /cvv|cvc|security ?code/i.test([i.name, i.id, i.getAttribute("aria-label"), i.placeholder, i.autocomplete].join(" ")));
+  if (cvv) return { outcome: "failed", message: "Target is asking for your card's security code (CVV). Enter it and press Place order." };
+
+  const totals = [...text().matchAll(/total[^\n$]{0,30}\$\s?(\d[\d,]*\.\d{2})/gi)].map((m) => parseFloat(m[1].replace(/,/g, "")));
+  if (!totals.length) return { outcome: "failed", message: "Couldn't read the order total, so the bot didn't buy." };
+  const total = Math.max(...totals);
+  if (total > maxTotal) {
+    return { outcome: "failed", total, message: `The total is $${total.toFixed(2)}, above the limit of $${maxTotal.toFixed(2)} (your max price plus tax and shipping). Is something else in the cart?` };
+  }
+  if (testOnly) return { outcome: "test_ok", total, message: "Test mode: stopped before Place order." };
+  button.click();
+  return { outcome: "placed", total, message: "Place order clicked." };
 }
 
 function readOrder() {

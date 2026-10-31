@@ -59,7 +59,7 @@ Keep Chrome open (it can be minimized). The helper updates itself along with the
 - **Badge "!":** Target or Pokémon Center wants a human check. Click the pinned tab and do it.
   You'll also get a Discord message. The helper never solves these for you.
 - **Auto add-to-cart (optional, in Settings):** when something comes in stock, the helper
-  opens it, clicks Add to cart and takes you to checkout. **It never presses Place order.** You do.
+  opens it, clicks Add to cart and takes you to checkout. See **Automatic checkout** below to let it press Place order too.
 
 ## How a restock gets confirmed (no false alarms)
 
@@ -83,9 +83,29 @@ By default Discord gets just two kinds of messages: **confirmed in stock** (with
 and **order placed**. Queues, human checks and new Discover listings stay on the dashboard,
 unless you tick "Also post queues, human checks and new listings to Discord" in Settings.
 
+## Automatic checkout (Target)
+
+In Settings, **Automatic checkout on Target** has three modes:
+- **Off:** you press Place order (default).
+- **Test:** the bot adds to cart and fills checkout, then stops **before** Place order and
+  notes the total in Activity. **Try this first on a real item** to make sure it works with your account.
+- **On:** the bot presses Place order itself.
+
+Safety rules, always on:
+- Only confirmed restocks (two checks), only sold by Target, only on Target.
+- Only items with a **max price** (on the item or its category).
+- Stops if the checkout total is over max price x 1.12 + $10 (tax and shipping). This also
+  catches other things sitting in your cart, so keep your Target cart empty.
+- **One order per item:** after an order, that item is paused.
+- **Daily spending limit** ($250 by default).
+- If Target wants you to sign in, asks for your card's **CVV**, or shows a human check, the
+  bot stops and Discord pings you: **CHECKOUT NEEDS YOU**. It never stores card details.
+
+Before a drop: be signed in to Target in this Chrome with your address and card saved.
+
 ## Order confirmations
 
-The helper never presses "Place order". You do. When you do, and the store shows its
+When an order is placed, by you or by automatic checkout, and the store shows its
 "Thank you for your order" page in Chrome, the helper reads the order number and total and
 you get an **ORDER PLACED** message on Discord. It also shows under **Orders placed** on the
 dashboard. If you check out on your phone instead, look for the store's confirmation email.
